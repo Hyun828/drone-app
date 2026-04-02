@@ -3,8 +3,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel }) {
+  const darkenHex = (hex, factor = 0.72) => {
+    const raw = String(hex || "").replace("#", "");
+    if (!/^[0-9a-fA-F]{6}$/.test(raw)) return "#7c3aed";
+    const to = (idx) => parseInt(raw.slice(idx, idx + 2), 16);
+    const r = Math.max(0, Math.min(255, Math.floor(to(0) * factor)));
+    const g = Math.max(0, Math.min(255, Math.floor(to(2) * factor)));
+    const b = Math.max(0, Math.min(255, Math.floor(to(4) * factor)));
+    const h = (n) => n.toString(16).padStart(2, "0");
+    return `#${h(r)}${h(g)}${h(b)}`;
+  };
   const GROUNDED_Y = 0.5;
-  const START_POSITION = [0, GROUNDED_Y, 0];
+  const START_POSITION = [0.5, GROUNDED_Y, 0.5];
   const START_ROTATION = 0;
   const STEP = 1;
   const ROTATE_STEP = Math.PI / 2;
@@ -25,8 +35,33 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
   const [dropTarget, setDropTarget] = useState(null);
   const [dragCursor, setDragCursor] = useState(null);
 
+  // Activity-area editor (grid placement)
+  const [selectedPlacementType, setSelectedPlacementType] = useState("obstacle"); // "obstacle" | "goal" | null
+  const [hoverCell, setHoverCell] = useState(null); // { x, z } in grid coords
+  const [placedItems, setPlacedItems] = useState(() => ({
+    obstacles: [{ id: 1, x: 2, z: -2, level: 0, color: "#a78bfa", edgeColor: "#7c3aed" }],
+    goal: { x: 4, z: -4 },
+  }));
+  const [showTopCommandPalette, setShowTopCommandPalette] = useState(false);
+  const [showLeftCommandList, setShowLeftCommandList] = useState(false);
+  const [showObjectMenu, setShowObjectMenu] = useState(true);
+  const [showObstacleColorPicker, setShowObstacleColorPicker] = useState(false);
+  const [obstacleColor, setObstacleColor] = useState("#a78bfa");
+  const [cameraResetToken, setCameraResetToken] = useState(0);
+  const [isSmallScreen, setIsSmallScreen] = useState(false);
+  const [isPortrait, setIsPortrait] = useState(false);
+
   const timerRef = useRef(null);
   const rafRef = useRef(null);
+  const crashResetTimerRef = useRef(null);
+  const audioRef = useRef({
+    ctx: null,
+    master: null,
+    rotorOscA: null,
+    rotorOscB: null,
+    rotorGainA: null,
+    rotorGainB: null,
+  });
   const runTokenRef = useRef(0);
   const nextCommandIdRef = useRef(2);
   const listContainerRef = useRef(null);
@@ -110,6 +145,105 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     setCurrentCommandId(null);
     if (timerRef.current) clearTimeout(timerRef.current);
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    if (crashResetTimerRef.current) clearTimeout(crashResetTimerRef.current);
+    stopRotorLoop();
+  }
+
+  function ensureAudioContext() {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return null;
+      const store = audioRef.current;
+      if (!store.ctx) {
+        store.ctx = new AudioCtx();
+        store.master = store.ctx.createGain();
+        store.master.gain.value = 0.2;
+        store.master.connect(store.ctx.destination);
+      }
+      if (store.ctx.state === "suspended") store.ctx.resume();
+      return store;
+    } catch {
+      return null;
+    }
+  }
+
+  function startRotorLoop() {
+    const store = ensureAudioContext();
+    if (!store || store.rotorOscA || store.rotorOscB) return;
+    const now = store.ctx.currentTime;
+    const oscA = store.ctx.createOscillator();
+    const oscB = store.ctx.createOscillator();
+    const gainA = store.ctx.createGain();
+    const gainB = store.ctx.createGain();
+    oscA.type = "sawtooth";
+    oscB.type = "triangle";
+    oscA.frequency.setValueAtTime(125, now);
+    oscB.frequency.setValueAtTime(182, now);
+    gainA.gain.setValueAtTime(0.0001, now);
+    gainB.gain.setValueAtTime(0.0001, now);
+    gainA.gain.exponentialRampToValueAtTime(0.06, now + 0.18);
+    gainB.gain.exponentialRampToValueAtTime(0.035, now + 0.18);
+    oscA.connect(gainA);
+    oscB.connect(gainB);
+    gainA.connect(store.master);
+    gainB.connect(store.master);
+    oscA.start(now);
+    oscB.start(now);
+    store.rotorOscA = oscA;
+    store.rotorOscB = oscB;
+    store.rotorGainA = gainA;
+    store.rotorGainB = gainB;
+  }
+
+  function stopRotorLoop() {
+    const store = audioRef.current;
+    if (!store?.ctx) return;
+    const now = store.ctx.currentTime;
+    if (store.rotorGainA) {
+      store.rotorGainA.gain.cancelScheduledValues(now);
+      store.rotorGainA.gain.setValueAtTime(Math.max(0.0001, store.rotorGainA.gain.value), now);
+      store.rotorGainA.gain.exponentialRampToValueAtTime(0.0001, now + 0.15);
+    }
+    if (store.rotorGainB) {
+      store.rotorGainB.gain.cancelScheduledValues(now);
+      store.rotorGainB.gain.setValueAtTime(Math.max(0.0001, store.rotorGainB.gain.value), now);
+      store.rotorGainB.gain.exponentialRampToValueAtTime(0.0001, now + 0.15);
+    }
+    if (store.rotorOscA) {
+      try {
+        store.rotorOscA.stop(now + 0.18);
+      } catch {}
+    }
+    if (store.rotorOscB) {
+      try {
+        store.rotorOscB.stop(now + 0.18);
+      } catch {}
+    }
+    store.rotorOscA = null;
+    store.rotorOscB = null;
+    store.rotorGainA = null;
+    store.rotorGainB = null;
+  }
+
+  function playSuccessChime() {
+    const store = ensureAudioContext();
+    if (!store) return;
+    const now = store.ctx.currentTime;
+    const notes = [523.25, 659.25, 783.99];
+    notes.forEach((freq, i) => {
+      const t = now + i * 0.14;
+      const osc = store.ctx.createOscillator();
+      const gain = store.ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(0.12, t + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.24);
+      osc.connect(gain);
+      gain.connect(store.master);
+      osc.start(t);
+      osc.stop(t + 0.26);
+    });
   }
 
   function stopExecution() {
@@ -121,6 +255,32 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     resetDroneOnly();
     // "이륙" 명령은 항상 기본 포함
     setCommands([{ id: 1, type: "이륙", amount: null }]);
+  }
+
+  function resetDroneAndView() {
+    resetDroneOnly();
+    setCameraResetToken((v) => v + 1);
+  }
+
+  function triggerCrashAndAutoReset(position, rotation) {
+    if (position) setDronePosition(position);
+    if (Number.isFinite(rotation)) setRotationY(rotation);
+    setIsCrash(true);
+    setIsRunning(false);
+    setCurrentIndex(-1);
+    setCurrentCommandId(null);
+    runTokenRef.current += 1;
+    if (timerRef.current) clearTimeout(timerRef.current);
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    if (crashResetTimerRef.current) clearTimeout(crashResetTimerRef.current);
+    stopRotorLoop();
+    crashResetTimerRef.current = setTimeout(() => {
+      resetDroneAndView();
+    }, 2000);
+  }
+
+  function clearPlacedObjects() {
+    setPlacedItems({ obstacles: [], goal: null });
   }
 
   function removeLastCommand() {
@@ -293,9 +453,30 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     return items.length;
   }
 
+  function getLoopInsertIndexFromEvent(loopContainer, clientY) {
+    const items = Array.from(loopContainer.querySelectorAll("[data-loop-item='true']"));
+    if (items.length === 0) return 0;
+    for (let i = 0; i < items.length; i += 1) {
+      const rect = items[i].getBoundingClientRect();
+      const midY = rect.top + rect.height * 0.5;
+      if (clientY < midY) return i;
+    }
+    return items.length;
+  }
+
+  function getClientPoint(e) {
+    if (e?.touches?.length) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    if (e?.changedTouches?.length) {
+      return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+    }
+    return { x: e?.clientX ?? 0, y: e?.clientY ?? 0 };
+  }
+
   function startPalettePointerDrag(e, type) {
     if (isRunning) return;
+    if (dragState) return;
     e.preventDefault();
+    const pt = getClientPoint(e);
     setDragState({
       source: "palette",
       type,
@@ -306,15 +487,17 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
             ? 90
             : null,
     });
-    setDragCursor({ x: e.clientX, y: e.clientY });
+    setDragCursor({ x: pt.x, y: pt.y });
     setDropTarget(null);
   }
 
   function startListPointerDrag(e, commandId) {
     if (isRunning) return;
+    if (dragState) return;
     e.preventDefault();
+    const pt = getClientPoint(e);
     setDragState({ source: "list", commandId });
-    setDragCursor({ x: e.clientX, y: e.clientY });
+    setDragCursor({ x: pt.x, y: pt.y });
     setDropTarget(null);
   }
 
@@ -334,20 +517,6 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
         setDropTarget(null);
         return;
       }
-      const loopInsertZones = Array.from(
-        container.querySelectorAll("[data-loop-insert-loop-id]")
-      );
-      for (let i = 0; i < loopInsertZones.length; i += 1) {
-        const zone = loopInsertZones[i];
-        const zr = zone.getBoundingClientRect();
-        if (e.clientX >= zr.left && e.clientX <= zr.right && e.clientY >= zr.top && e.clientY <= zr.bottom) {
-          const loopId = Number(zone.getAttribute("data-loop-insert-loop-id"));
-          const index = Number(zone.getAttribute("data-loop-insert-index"));
-          setDropTarget({ type: "loop-between", loopId, index });
-          setDropIndex(null);
-          return;
-        }
-      }
       const loopZones = Array.from(container.querySelectorAll("[data-loop-drop-id]"));
       let loopMatched = false;
       for (let i = 0; i < loopZones.length; i += 1) {
@@ -355,7 +524,8 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
         const zr = zone.getBoundingClientRect();
         if (e.clientX >= zr.left && e.clientX <= zr.right && e.clientY >= zr.top && e.clientY <= zr.bottom) {
           const loopId = Number(zone.getAttribute("data-loop-drop-id"));
-          setDropTarget({ type: "loop", loopId });
+          const index = getLoopInsertIndexFromEvent(zone, e.clientY);
+          setDropTarget({ type: "loop-between", loopId, index });
           setDropIndex(null);
           loopMatched = true;
           break;
@@ -379,13 +549,43 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
       setDropTarget(null);
     }
 
-    window.addEventListener("pointermove", handlePointerMove, { passive: false });
-    window.addEventListener("pointerup", handlePointerUp, { passive: true });
+    const hasPointerEvent = typeof window !== "undefined" && "PointerEvent" in window;
+
+    function handleTouchMove(e) {
+      if (!e.touches?.length) return;
+      e.preventDefault();
+      const t = e.touches[0];
+      handlePointerMove({ preventDefault: () => {}, clientX: t.clientX, clientY: t.clientY });
+    }
+
+    function handleTouchEnd() {
+      handlePointerUp();
+    }
+
+    if (hasPointerEvent) {
+      window.addEventListener("pointermove", handlePointerMove, { passive: false });
+      window.addEventListener("pointerup", handlePointerUp, { passive: true });
+    } else {
+      window.addEventListener("touchmove", handleTouchMove, { passive: false });
+      window.addEventListener("touchend", handleTouchEnd, { passive: true });
+      window.addEventListener("touchcancel", handleTouchEnd, { passive: true });
+    }
     return () => {
-      window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", handlePointerUp);
+      if (hasPointerEvent) {
+        window.removeEventListener("pointermove", handlePointerMove);
+        window.removeEventListener("pointerup", handlePointerUp);
+      } else {
+        window.removeEventListener("touchmove", handleTouchMove);
+        window.removeEventListener("touchend", handleTouchEnd);
+        window.removeEventListener("touchcancel", handleTouchEnd);
+      }
     };
   }, [dragState, dropIndex, dropTarget]);
+
+  function startPaletteTouchDrag(e, type) {
+    if (typeof window !== "undefined" && "PointerEvent" in window) return;
+    startPalettePointerDrag(e, type);
+  }
 
   function waitWithToken(ms, token) {
     return new Promise((resolve) => {
@@ -395,7 +595,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     });
   }
 
-  function animateCommandStep(fromPos, toPos, fromRot, toRot, durationMs, token) {
+  function animateCommandStep(fromPos, toPos, fromRot, toRot, durationMs, token, shouldAbortAt) {
     return new Promise((resolve) => {
       const start = performance.now();
       const easeOut = (t) => 1 - (1 - t) * (1 - t) * (1 - t);
@@ -411,6 +611,13 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
         const ny = fromPos[1] + (toPos[1] - fromPos[1]) * t;
         const nz = fromPos[2] + (toPos[2] - fromPos[2]) * t;
         const nr = fromRot + (toRot - fromRot) * t;
+        const candidatePos = [nx, ny, nz];
+        if (shouldAbortAt?.(candidatePos)) {
+          setDronePosition(candidatePos);
+          setRotationY(nr);
+          resolve(false);
+          return;
+        }
         setDronePosition([nx, ny, nz]);
         setRotationY(nr);
 
@@ -427,7 +634,8 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
 
   function updateCommandAmount(commandId, amount) {
     if (isRunning) return;
-    const normalized = Number.isFinite(amount) && amount > 0 ? Math.floor(amount) : 1;
+    const normalized =
+      amount === null ? null : Number.isFinite(amount) && amount > 0 ? Math.floor(amount) : 1;
     const update = (list) =>
       list.map((c) => {
         if (c.id === commandId) return { ...c, amount: normalized };
@@ -452,7 +660,8 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
 
   function updateLoopRepeat(commandId, amount) {
     if (isRunning) return;
-    const normalized = Number.isFinite(amount) && amount > 0 ? Math.floor(amount) : 1;
+    const normalized =
+      amount === null ? null : Number.isFinite(amount) && amount > 0 ? Math.floor(amount) : 1;
     const update = (list) =>
       list.map((c) => {
         if (c.id === commandId) return { ...c, amount: normalized };
@@ -481,6 +690,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     let nextRotation = rotation;
     let nextIsFlying = isFlying;
     const moveUnits = Math.max(1, Number.isFinite(command.amount) ? command.amount : 1);
+    const snapToCellCenter = (value) => Math.round(value - 0.5) + 0.5;
     const forwardX = -Math.sin(rotation);
     const forwardZ = -Math.cos(rotation);
     const rightX = Math.cos(rotation);
@@ -506,23 +716,23 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     }
 
     if (nextIsFlying && command.type === "앞으로 이동") {
-      x = Math.round(x + forwardX * STEP * moveUnits);
-      z = Math.round(z + forwardZ * STEP * moveUnits);
+      x = snapToCellCenter(x + forwardX * STEP * moveUnits);
+      z = snapToCellCenter(z + forwardZ * STEP * moveUnits);
     }
 
     if (nextIsFlying && command.type === "뒤로 이동") {
-      x = Math.round(x - forwardX * STEP * moveUnits);
-      z = Math.round(z - forwardZ * STEP * moveUnits);
+      x = snapToCellCenter(x - forwardX * STEP * moveUnits);
+      z = snapToCellCenter(z - forwardZ * STEP * moveUnits);
     }
 
     if (nextIsFlying && command.type === "왼쪽 이동") {
-      x = Math.round(x - rightX * STEP * moveUnits);
-      z = Math.round(z - rightZ * STEP * moveUnits);
+      x = snapToCellCenter(x - rightX * STEP * moveUnits);
+      z = snapToCellCenter(z - rightZ * STEP * moveUnits);
     }
 
     if (nextIsFlying && command.type === "오른쪽 이동") {
-      x = Math.round(x + rightX * STEP * moveUnits);
-      z = Math.round(z + rightZ * STEP * moveUnits);
+      x = snapToCellCenter(x + rightX * STEP * moveUnits);
+      z = snapToCellCenter(z + rightZ * STEP * moveUnits);
     }
 
     const turnStepRad = (Math.PI * Math.max(30, Math.min(180, command.amount ?? 90))) / 180;
@@ -554,6 +764,11 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     setCurrentIndex(0);
 
     const sequence = expandCommands(commands);
+    const hitPlacedObstacleAt = (position) =>
+      (placedItems.obstacles ?? []).some((o) =>
+        // Drone visual size was reduced, so collision box should be tighter too.
+        checkBoxHit(position, [o.x + 0.5, 1 + (o.level ?? 0), o.z + 0.5], 0.68)
+      );
     let tempPosition = [...START_POSITION];
     let tempRotation = START_ROTATION;
     let tempIsFlying = false;
@@ -581,6 +796,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
         );
 
         if (command.type === "이륙") {
+          startRotorLoop();
           const stage1 = [tempPosition[0], GROUNDED_Y + 0.35, tempPosition[2]];
           const ok1 = await animateCommandStep(
             tempPosition,
@@ -588,7 +804,12 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
             tempRotation,
             nextRotation,
             900,
-            token
+            token,
+            (candidatePos) => {
+              if (!hitPlacedObstacleAt(candidatePos)) return false;
+              triggerCrashAndAutoReset(candidatePos, nextRotation);
+              return true;
+            }
           );
           if (!ok1) return;
           const ok2 = await animateCommandStep(
@@ -597,7 +818,12 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
             nextRotation,
             nextRotation,
             1400,
-            token
+            token,
+            (candidatePos) => {
+              if (!hitPlacedObstacleAt(candidatePos)) return false;
+              triggerCrashAndAutoReset(candidatePos, nextRotation);
+              return true;
+            }
           );
           if (!ok2) return;
         } else if (command.type === "착륙") {
@@ -607,7 +833,12 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
             tempRotation,
             nextRotation,
             1700,
-            token
+            token,
+            (candidatePos) => {
+              if (!hitPlacedObstacleAt(candidatePos)) return false;
+              triggerCrashAndAutoReset(candidatePos, nextRotation);
+              return true;
+            }
           );
           if (!ok) return;
         } else if (usesMoveAmount(command.type)) {
@@ -617,7 +848,12 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
             tempRotation,
             nextRotation,
             1840,
-            token
+            token,
+            (candidatePos) => {
+              if (!hitPlacedObstacleAt(candidatePos)) return false;
+              triggerCrashAndAutoReset(candidatePos, nextRotation);
+              return true;
+            }
           );
           if (!ok) return;
         } else {
@@ -627,22 +863,33 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
             tempRotation,
             nextRotation,
             1440,
-            token
+            token,
+            (candidatePos) => {
+              if (!hitPlacedObstacleAt(candidatePos)) return false;
+              triggerCrashAndAutoReset(candidatePos, nextRotation);
+              return true;
+            }
           );
           if (!ok) return;
         }
 
-        if (checkBoxHit(nextPosition, obstaclePosition, 1.1)) {
-          setDronePosition(nextPosition);
-          setRotationY(nextRotation);
-          setIsCrash(true);
-          setIsRunning(false);
-          setCurrentIndex(-1);
-          setCurrentCommandId(null);
+        const hitPlacedObstacle = hitPlacedObstacleAt(nextPosition);
+        if (hitPlacedObstacle) {
+          triggerCrashAndAutoReset(nextPosition, nextRotation);
           return;
         }
 
-        if (checkBoxHit(nextPosition, goalPosition, 1)) {
+        const activeGoal = placedItems.goal
+          ? [placedItems.goal.x + 0.5, goalPosition[1], placedItems.goal.z + 0.5]
+          : goalPosition;
+        const landedOnGoal =
+          command.type === "착륙" &&
+          !nextIsFlying &&
+          Math.abs(nextPosition[0] - activeGoal[0]) < 1 &&
+          Math.abs(nextPosition[2] - activeGoal[2]) < 1;
+        if (landedOnGoal) {
+          stopRotorLoop();
+          playSuccessChime();
           setIsSuccess(true);
           setIsRunning(false);
           setCurrentIndex(-1);
@@ -661,6 +908,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
       setIsRunning(false);
       setCurrentIndex(-1);
       setCurrentCommandId(null);
+      stopRotorLoop();
     }
 
     runNext();
@@ -671,8 +919,76 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
       runTokenRef.current += 1;
       if (timerRef.current) clearTimeout(timerRef.current);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (crashResetTimerRef.current) clearTimeout(crashResetTimerRef.current);
+      stopRotorLoop();
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const updateSmall = () =>
+      setIsSmallScreen(Math.min(window.innerWidth, window.innerHeight) <= 820);
+    const mq = window.matchMedia("(orientation: portrait)");
+    const updatePortrait = () => setIsPortrait(Boolean(mq.matches));
+    updateSmall();
+    updatePortrait();
+    window.addEventListener("resize", updateSmall, { passive: true });
+    mq.addEventListener?.("change", updatePortrait);
+    return () => {
+      window.removeEventListener("resize", updateSmall);
+      mq.removeEventListener?.("change", updatePortrait);
+    };
+  }, []);
+
+  function selectPlacementType(e, type) {
+    if (isRunning) return;
+    e.preventDefault();
+    setSelectedPlacementType((prev) => (prev === type ? null : type));
+  }
+
+  function handlePlaceAtCell(cell) {
+    if (!selectedPlacementType || !cell) return;
+    setPlacedItems((prev) => {
+      if (selectedPlacementType === "goal") {
+        return { ...prev, goal: { x: cell.x, z: cell.z } };
+      }
+      if (selectedPlacementType === "delete") {
+        const sameCell = prev.obstacles.filter((o) => o.x === cell.x && o.z === cell.z);
+        if (sameCell.length > 0) {
+          const top = sameCell.reduce((best, o) => (o.level > best.level ? o : best), sameCell[0]);
+          return { ...prev, obstacles: prev.obstacles.filter((o) => o.id !== top.id) };
+        }
+        if (prev.goal && prev.goal.x === cell.x && prev.goal.z === cell.z) {
+          return { ...prev, goal: null };
+        }
+        return prev;
+      }
+      // 목표 칸에는 장애물을 배치하지 않음(경고 없이 무시)
+      if (prev.goal && prev.goal.x === cell.x && prev.goal.z === cell.z) {
+        return prev;
+      }
+      // 드론 시작 칸(0,0)에는 장애물을 배치하지 않음
+      if (cell.x === 0 && cell.z === 0) {
+        return prev;
+      }
+      const nextId = (prev.obstacles.reduce((m, o) => Math.max(m, o.id), 0) || 0) + 1;
+      const nextLevel = prev.obstacles.filter((o) => o.x === cell.x && o.z === cell.z).length;
+      return {
+        ...prev,
+        obstacles: [
+          ...prev.obstacles,
+          {
+            id: nextId,
+            x: cell.x,
+            z: cell.z,
+            level: nextLevel,
+            color: obstacleColor,
+            edgeColor: darkenHex(obstacleColor),
+          },
+        ],
+      };
+    });
+  }
 
   const renderCommandEditor = (command, compact = false) => {
     const textSize = compact ? "text-xs" : "text-sm";
@@ -686,11 +1002,23 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
               type="number"
               min={1}
               step={1}
-              value={command.amount ?? 1}
+              inputMode="numeric"
+              value={command.amount ?? ""}
               onChange={(e) => {
-                const raw = Number(e.target.value);
+                const rawText = e.target.value;
+                if (rawText === "") {
+                  updateLoopRepeat(command.id, null);
+                  return;
+                }
+                const raw = Number(rawText);
                 updateLoopRepeat(command.id, raw);
               }}
+              onBlur={() => {
+                if (!Number.isFinite(command.amount) || command.amount < 1) {
+                  updateLoopRepeat(command.id, 1);
+                }
+              }}
+              onFocus={(e) => e.target.select()}
               onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
               className={`${inputSize} px-1 py-0.5 rounded border text-black font-semibold`}
@@ -705,11 +1033,23 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
               type="number"
               min={1}
               step={1}
-              value={command.amount ?? 1}
+              inputMode="numeric"
+              value={command.amount ?? ""}
               onChange={(e) => {
-                const raw = Number(e.target.value);
+                const rawText = e.target.value;
+                if (rawText === "") {
+                  updateCommandAmount(command.id, null);
+                  return;
+                }
+                const raw = Number(rawText);
                 updateCommandAmount(command.id, raw);
               }}
+              onBlur={() => {
+                if (!Number.isFinite(command.amount) || command.amount < 1) {
+                  updateCommandAmount(command.id, 1);
+                }
+              }}
+              onFocus={(e) => e.target.select()}
               onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
               className={`${inputSize} px-1 py-0.5 rounded border text-black font-semibold`}
@@ -723,11 +1063,23 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
               type="number"
               min={1}
               step={1}
-              value={command.amount ?? 1}
+              inputMode="numeric"
+              value={command.amount ?? ""}
               onChange={(e) => {
-                const raw = Number(e.target.value);
+                const rawText = e.target.value;
+                if (rawText === "") {
+                  updateCommandAmount(command.id, null);
+                  return;
+                }
+                const raw = Number(rawText);
                 updateCommandAmount(command.id, raw);
               }}
+              onBlur={() => {
+                if (!Number.isFinite(command.amount) || command.amount < 1) {
+                  updateCommandAmount(command.id, 1);
+                }
+              }}
+              onFocus={(e) => e.target.select()}
               onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
               className={`${inputSize} px-1 py-0.5 rounded border text-black font-semibold`}
@@ -796,7 +1148,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
             "여기에 명령 블록을 놓으세요"
           ) : (
             children.map((child, childIdx) => (
-              <div key={child.id}>
+              <div key={child.id} data-loop-item="true">
                 <div
                   onPointerDown={(e) => startListPointerDrag(e, child.id)}
                   className={`relative mt-1 rounded px-2 py-1 ${
@@ -840,51 +1192,80 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
   };
 
   return (
-    <div className="w-full h-full min-h-0 flex flex-col">
-      <div className="p-2 md:p-4 bg-white border-b shrink-0 select-none">
-        <div
-          className="flex gap-2 md:gap-3 overflow-x-auto whitespace-nowrap justify-start md:justify-center pb-1"
-          style={{ touchAction: "pan-x" }}
-        >
-        {commandPalette.map((item) => (
-          <button
-            key={item.type}
-            onPointerDown={(e) => startPalettePointerDrag(e, item.type)}
-            className={`px-3 py-1.5 md:px-4 md:py-2 text-sm md:text-base ${item.colorClass} rounded-lg shrink-0 ${
-              isRunning ? "opacity-60 cursor-not-allowed" : "cursor-grab active:cursor-grabbing"
-            }`}
-            disabled={isRunning}
-            title="드래그해서 명령 목록에 추가"
+    <div className="w-full h-full min-h-0 flex flex-col relative">
+      {showTopCommandPalette && (
+        <div className="p-1 sm:p-2 md:p-4 bg-white border-b shrink-0 select-none">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowTopCommandPalette(false)}
+              className="px-2 py-1 rounded-md bg-blue-600 text-white text-xs font-semibold shrink-0"
+              title="위 명령어 메뉴 접기"
+            >
+              ▴
+            </button>
+          </div>
+          <div
+            className="mt-1 flex gap-1 sm:gap-2 md:gap-3 overflow-x-auto whitespace-nowrap justify-start md:justify-center pb-0.5"
+            style={{ touchAction: "pan-x" }}
           >
-            {usesMoveAmount(item.type)
-              ? `${item.type.split(" ")[0]} 1칸 이동`
-              : usesVerticalAmount(item.type)
-                ? `1칸 ${item.type}`
-                : isLoopType(item.type)
-                  ? "1번 반복"
-                : item.type}
-          </button>
-        ))}
-        </div>
-      </div>
-
-      {isSuccess && (
-        <div className="bg-green-100 text-green-700 text-center py-2 font-bold shrink-0">
-          성공
+          {commandPalette.map((item) => (
+            <button
+              key={item.type}
+              onPointerDown={(e) => startPalettePointerDrag(e, item.type)}
+              onTouchStart={(e) => startPaletteTouchDrag(e, item.type)}
+              className={`px-1.5 sm:px-3 py-0.5 sm:py-1.5 md:px-4 md:py-2 text-[10px] sm:text-sm md:text-base ${item.colorClass} rounded-md sm:rounded-lg shrink-0 ${
+                isRunning ? "opacity-60 cursor-not-allowed" : "cursor-grab active:cursor-grabbing"
+              }`}
+              disabled={isRunning}
+              title="드래그해서 명령 목록에 추가"
+            >
+              {usesMoveAmount(item.type)
+                ? `${item.type.split(" ")[0]} 1칸 이동`
+                : usesVerticalAmount(item.type)
+                  ? `1칸 ${item.type}`
+                  : isLoopType(item.type)
+                    ? "1번 반복"
+                  : item.type}
+            </button>
+          ))}
+          </div>
         </div>
       )}
 
-      {isCrash && (
-        <div className="bg-red-100 text-red-700 text-center py-2 font-bold shrink-0">
-          충돌
+      {isSuccess && (
+        <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 top-[24%] z-[120]">
+          <div className="px-6 py-3 rounded-2xl bg-emerald-600/95 text-white text-2xl sm:text-3xl font-extrabold shadow-2xl whitespace-nowrap">
+            성공입니다! 축하합니다!
+          </div>
         </div>
       )}
 
       <div className="flex-1 min-h-0 flex">
-        <div className="w-[290px] shrink-0 bg-white border-r p-3 overflow-y-auto relative pb-14">
+        {showLeftCommandList ? (
+        <div
+          className="shrink-0 bg-white border-r p-2 md:p-3 overflow-y-auto relative pb-14"
+          style={{
+            width: isSmallScreen ? (isPortrait ? 145 : 220) : 290,
+          }}
+        >
           <div className="mb-3 flex items-center justify-between gap-2">
-            <h2 className="text-lg font-bold">명령 목록</h2>
             <div className="flex items-center gap-1.5">
+              {!showTopCommandPalette && (
+                <button
+                  onClick={() => setShowTopCommandPalette(true)}
+                  className="w-7 h-7 bg-blue-600 text-white rounded-md text-sm font-bold leading-none flex items-center justify-center"
+                  title="위 명령어 메뉴 펼치기"
+                >
+                  ▾
+                </button>
+              )}
+              <button
+                onClick={() => setShowLeftCommandList(false)}
+                className="px-2 py-1 bg-blue-600 text-white rounded-md text-xs font-semibold"
+                title="왼쪽 코딩메뉴 접기"
+              >
+                ◂
+              </button>
               <button
                 onClick={runCommands}
                 className="px-2.5 py-1.5 bg-indigo-600 text-white rounded-md text-xs font-semibold disabled:bg-gray-300"
@@ -899,12 +1280,14 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
               >
                 정지
               </button>
+              <button
+                onClick={resetDroneAndView}
+                className="px-2.5 py-1.5 bg-blue-700 text-white rounded-md text-xs font-semibold"
+              >
+                초기화
+              </button>
             </div>
           </div>
-          <p className="text-xs text-gray-500 mb-2">
-            버튼을 끌어 목록에 놓고, 목록 항목도 드래그로 순서를 바꿀 수 있습니다.
-          </p>
-
           <div ref={listContainerRef} className="touch-none select-none">
             {commands.length === 0 ? (
               <div
@@ -980,13 +1363,181 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
             </button>
           </div>
         </div>
+        ) : (
+          <div className="w-[44px] shrink-0 bg-white border-r flex flex-col items-center gap-2 pt-3">
+            {!showTopCommandPalette && (
+              <button
+                onClick={() => setShowTopCommandPalette(true)}
+                className="w-7 h-7 bg-blue-600 text-white rounded-md text-sm font-bold leading-none flex items-center justify-center"
+                title="위 명령어 메뉴 펼치기"
+              >
+                ▾
+              </button>
+            )}
+            <button
+              onClick={() => setShowLeftCommandList(true)}
+              className="w-7 h-7 bg-blue-600 text-white rounded-md text-sm font-bold leading-none flex items-center justify-center"
+              title="왼쪽 코딩메뉴 펼치기"
+            >
+              ▸
+            </button>
+          </div>
+        )}
 
-        <CodingScene
-          dronePosition={dronePosition}
-          rotationY={rotationY}
-          goalPosition={goalPosition}
-          obstaclePosition={obstaclePosition}
-        />
+        <div className="relative flex-1 min-w-0">
+          <CodingScene
+            dronePosition={dronePosition}
+            rotationY={rotationY}
+            goalPosition={goalPosition}
+            obstaclePosition={obstaclePosition}
+            placedItems={placedItems}
+            placementType={selectedPlacementType}
+            obstacleColor={obstacleColor}
+            obstacleEdgeColor={darkenHex(obstacleColor)}
+            hoverCell={hoverCell}
+            onHoverCell={setHoverCell}
+            onPlaceAtCell={handlePlaceAtCell}
+            isRunning={isRunning}
+            cameraResetToken={cameraResetToken}
+            isCrash={isCrash}
+          />
+
+          <div
+            data-ui-block="true"
+            className={`z-[160] bg-white/90 backdrop-blur border rounded-xl p-2 shadow-sm w-[84px] ${
+              isSmallScreen
+                ? "fixed right-2"
+                : "absolute right-3 top-1/2 -translate-y-1/2"
+            }`}
+            style={{
+              right: "calc(8px + env(safe-area-inset-right, 0px))",
+              top: isSmallScreen
+                ? showTopCommandPalette
+                  ? isPortrait
+                    ? "calc(74px + env(safe-area-inset-top, 0px))"
+                    : "calc(132px + env(safe-area-inset-top, 0px))"
+                  : isPortrait
+                    ? "calc(18px + env(safe-area-inset-top, 0px))"
+                    : "calc(78px + env(safe-area-inset-top, 0px))"
+                : undefined,
+            }}
+          >
+            <div className="relative mb-2">
+              <button
+                onClick={() => setShowObjectMenu((v) => !v)}
+                className="mx-auto block w-6 h-6 rounded bg-blue-600 text-white text-[11px] font-bold leading-none"
+                title="물체 메뉴 접기/펼치기"
+              >
+                {showObjectMenu ? "▴" : "▾"}
+              </button>
+            </div>
+            {showObjectMenu && (
+              <>
+            <div className="flex flex-col items-center gap-2">
+              <button
+                onClick={(e) => selectPlacementType(e, "goal")}
+                className={`w-10 h-10 rounded-lg shadow border flex items-center justify-center ${
+                  selectedPlacementType === "goal"
+                    ? "border-cyan-300 ring-2 ring-cyan-300/70 bg-emerald-600"
+                    : "border-emerald-700 bg-emerald-600"
+                } ${
+                  isRunning ? "opacity-60 cursor-not-allowed" : "cursor-pointer"
+                }`}
+                disabled={isRunning}
+                title="선택 후 격자 칸을 눌러 배치"
+                aria-label="목표지점 배치"
+              >
+                <span className="w-8 h-8 rounded-md bg-emerald-300 border border-emerald-100/80 text-emerald-900 text-[10px] font-bold flex items-center justify-center">
+                  목표
+                </span>
+              </button>
+              <button
+                onClick={(e) => selectPlacementType(e, "obstacle")}
+                className={`w-10 h-10 rounded-lg shadow border flex items-center justify-center ${
+                  selectedPlacementType === "obstacle"
+                    ? "ring-2 ring-cyan-300/70"
+                    : ""
+                } ${
+                  isRunning ? "opacity-60 cursor-not-allowed" : "cursor-pointer"
+                }`}
+                style={{
+                  backgroundColor: darkenHex(obstacleColor, 0.75),
+                  borderColor: darkenHex(obstacleColor, 0.58),
+                }}
+                disabled={isRunning}
+                title="선택 후 격자 칸을 눌러 배치"
+                aria-label="장애물 배치"
+              >
+                <span
+                  className="w-8 h-8 rounded-md text-[9px] font-bold flex items-center justify-center"
+                  style={{
+                    backgroundColor: obstacleColor,
+                    border: `1px solid ${darkenHex(obstacleColor)}`,
+                    color: darkenHex(obstacleColor, 0.6),
+                  }}
+                >
+                  장애물
+                </span>
+              </button>
+              <button
+                onClick={() => setShowObstacleColorPicker((v) => !v)}
+                className="w-10 h-5 rounded-md border border-gray-300 shadow-sm"
+                style={{ backgroundColor: obstacleColor }}
+                title="장애물 색상 선택"
+                aria-label="장애물 현재 색상"
+              />
+              {showObstacleColorPicker && (
+                <div className="grid grid-cols-3 gap-1">
+                  {["#a78bfa", "#f472b6", "#60a5fa", "#34d399", "#f59e0b", "#f87171"].map((color) => (
+                    <button
+                      key={color}
+                      onClick={() => {
+                        setObstacleColor(color);
+                        setShowObstacleColorPicker(false);
+                      }}
+                      className={`w-4 h-4 rounded-sm border ${
+                        obstacleColor === color ? "border-black" : "border-gray-400"
+                      }`}
+                      style={{ backgroundColor: color }}
+                      aria-label={`장애물 색상 ${color}`}
+                    />
+                  ))}
+                </div>
+              )}
+              <button
+                onClick={(e) => selectPlacementType(e, "delete")}
+                className={`w-10 h-10 rounded-lg shadow border flex items-center justify-center ${
+                  selectedPlacementType === "delete"
+                    ? "border-cyan-300 ring-2 ring-cyan-300/70 bg-rose-600"
+                    : "border-rose-700 bg-rose-600"
+                } ${
+                  isRunning ? "opacity-60 cursor-not-allowed" : "cursor-pointer"
+                }`}
+                disabled={isRunning}
+                title="선택 후 격자 칸을 눌러 삭제"
+                aria-label="삭제 배치 모드"
+              >
+                <span className="w-8 h-8 rounded-md bg-rose-300 border border-rose-100/80 text-rose-900 text-[10px] font-bold flex items-center justify-center">
+                  삭제
+                </span>
+              </button>
+              <button
+                onClick={clearPlacedObjects}
+                className="w-10 h-10 rounded-lg shadow border border-gray-400 bg-gray-200 text-gray-800 text-[9px] font-bold"
+                title="배치한 물체 전체 삭제"
+              >
+                모두 삭제
+              </button>
+            </div>
+            <div className="mt-2 text-[10px] text-gray-600 text-center leading-tight">
+              선택 후
+              <br />
+              격자 칸 터치
+            </div>
+              </>
+            )}
+          </div>
+        </div>
       </div>
 
       {dragState && dragCursor && (

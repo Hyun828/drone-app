@@ -81,6 +81,31 @@ function checkObstacleHit(position, obstaclePosition, radius = 1.1) {
   );
 }
 
+function getDroneCollisionSamplePoints(position, rotation) {
+  const cx = position[0];
+  const cz = position[2];
+  const forwardX = -Math.sin(rotation);
+  const forwardZ = -Math.cos(rotation);
+  const rightX = Math.cos(rotation);
+  const rightZ = -Math.sin(rotation);
+  const halfLength = 0.5;
+  const halfWidth = 0.5;
+
+  const project = (f, r) => [cx + forwardX * f + rightX * r, position[1], cz + forwardZ * f + rightZ * r];
+
+  return [
+    [cx, position[1], cz], // center
+    project(halfLength, 0), // front
+    project(-halfLength, 0), // back
+    project(0, halfWidth), // right
+    project(0, -halfWidth), // left
+    project(halfLength, halfWidth), // front-right
+    project(halfLength, -halfWidth), // front-left
+    project(-halfLength, halfWidth), // back-right
+    project(-halfLength, -halfWidth), // back-left
+  ];
+}
+
 function pointToSegmentDistanceXZ(point, a, b) {
   const px = point[0];
   const pz = point[2];
@@ -112,61 +137,337 @@ function distanceToPolylineXZ(point, polylinePoints) {
   return minDist;
 }
 
+// =========================
+// Grid pathfinding (4-dir) with turn constraint
+// =========================
+class MinHeap {
+  constructor() {
+    this.arr = [];
+  }
+
+  push(item) {
+    this.arr.push(item);
+    this.bubbleUp(this.arr.length - 1);
+  }
+
+  bubbleUp(i) {
+    const arr = this.arr;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (arr[p].f <= arr[i].f) break;
+      const tmp = arr[p];
+      arr[p] = arr[i];
+      arr[i] = tmp;
+      i = p;
+    }
+  }
+
+  pop() {
+    const arr = this.arr;
+    if (arr.length === 0) return null;
+    const top = arr[0];
+    const last = arr.pop();
+    if (arr.length > 0) {
+      arr[0] = last;
+      this.sinkDown(0);
+    }
+    return top;
+  }
+
+  sinkDown(i) {
+    const arr = this.arr;
+    const n = arr.length;
+    while (true) {
+      const l = i * 2 + 1;
+      const r = i * 2 + 2;
+      let smallest = i;
+      if (l < n && arr[l].f < arr[smallest].f) smallest = l;
+      if (r < n && arr[r].f < arr[smallest].f) smallest = r;
+      if (smallest === i) break;
+      const tmp = arr[i];
+      arr[i] = arr[smallest];
+      arr[smallest] = tmp;
+      i = smallest;
+    }
+  }
+
+  get size() {
+    return this.arr.length;
+  }
+}
+
+function worldToCellIndex(worldCoord, minWorld, cellSize) {
+  // cell center = minWorld + (i + 0.5) * cellSize
+  // i = (world - minWorld) / cellSize - 0.5
+  // For stamping we care which cell contains the world point, so use floor.
+  // This avoids off-by-one errors that make the start cap appear uncolored.
+  return Math.floor((worldCoord - minWorld) / cellSize);
+}
+
+function computeGridPathCells4DirTurnAStar({
+  gridMinX,
+  gridMinZ,
+  cellSize,
+  cols,
+  rows,
+  startWorld,
+  goalWorld,
+  desiredBends, // 0~2 for our map; exact target if possible
+  allowFewerBends = true,
+  blockedMask = null, // Uint8Array size cols*rows, 1 means blocked
+}) {
+  const unknownDir = 4;
+  const dirCount = 5; // 0..3 normal, 4 = unknown
+  const maxBends = desiredBends;
+
+  const startX = clamp(worldToCellIndex(startWorld[0], gridMinX, cellSize), 0, cols - 1);
+  const startZ = clamp(worldToCellIndex(startWorld[2], gridMinZ, cellSize), 0, rows - 1);
+  const goalX = clamp(worldToCellIndex(goalWorld[0], gridMinX, cellSize), 0, cols - 1);
+  const goalZ = clamp(worldToCellIndex(goalWorld[2], gridMinZ, cellSize), 0, rows - 1);
+
+  const goalCellId = goalZ * cols + goalX;
+  const startCellId = startZ * cols + startX;
+
+  const turnsCount = maxBends + 1; // includes 0..maxBends
+  const stateCount = cols * rows * dirCount * turnsCount;
+
+  const dist = new Float64Array(stateCount);
+  dist.fill(Infinity);
+
+  const parent = new Int32Array(stateCount);
+  parent.fill(-1);
+
+  const stateId = (cellId, dir, turns) => ((cellId * dirCount + dir) * turnsCount + turns);
+
+  const startState = stateId(startCellId, unknownDir, 0);
+  dist[startState] = 0;
+
+  const heap = new MinHeap();
+
+  const manhattan = (x, z) => Math.abs(x - goalX) + Math.abs(z - goalZ);
+  heap.push({ f: manhattan(startX, startZ), g: 0, cellId: startCellId, dir: unknownDir, turns: 0 });
+
+  const dirs = [
+    [1, 0], // +X
+    [-1, 0], // -X
+    [0, 1], // +Z
+    [0, -1], // -Z
+  ];
+
+  let bestGoalState = -1;
+  let bestGoalG = Infinity;
+
+  while (heap.size > 0) {
+    const cur = heap.pop();
+    const { cellId, dir, turns, g } = cur;
+
+    const cid = stateId(cellId, dir, turns);
+    if (g !== dist[cid]) continue;
+
+    const x = cellId % cols;
+    const z = (cellId / cols) | 0;
+
+    if (cellId === goalCellId && turns === desiredBends) {
+      // Because A* with admissible heuristic: first time we pop goal with exact turns is optimal.
+      bestGoalState = cid;
+      bestGoalG = g;
+      break;
+    }
+
+    for (let ndir = 0; ndir < 4; ndir += 1) {
+      const [dx, dz] = dirs[ndir];
+      const nx = x + dx;
+      const nz = z + dz;
+      if (nx < 0 || nx >= cols || nz < 0 || nz >= rows) continue;
+      const nCellId = nz * cols + nx;
+      if (blockedMask && blockedMask[nCellId] === 1) continue;
+
+      const addTurn = dir !== unknownDir && ndir !== dir ? 1 : 0;
+      const nTurns = turns + addTurn;
+      if (nTurns > maxBends) continue;
+
+      const ng = g + 1;
+      const nid = stateId(nCellId, ndir, nTurns);
+      if (ng >= dist[nid]) continue;
+
+      dist[nid] = ng;
+      parent[nid] = cid;
+      const nf = ng + manhattan(nx, nz);
+      heap.push({ f: nf, g: ng, cellId: nCellId, dir: ndir, turns: nTurns });
+    }
+  }
+
+  // Fallback: if exact turns not found, optionally take the closest goal among <= desiredBends
+  if (bestGoalState < 0 && allowFewerBends) {
+    for (let t = 0; t <= desiredBends; t += 1) {
+      let best = -1;
+      let bestG = Infinity;
+      for (let d = 0; d < 4; d += 1) {
+        const sid = stateId(goalCellId, d, t);
+        if (dist[sid] < bestG) {
+          bestG = dist[sid];
+          best = sid;
+        }
+      }
+      if (best >= 0 && bestG < Infinity) {
+        bestGoalState = best;
+        bestGoalG = bestG;
+        break;
+      }
+    }
+  }
+
+  if (bestGoalState < 0) return [];
+
+  // Reconstruct path of cellIds
+  const pathCellIds = [];
+  let cur = bestGoalState;
+  while (cur >= 0) {
+    pathCellIds.push(cur);
+    const p = parent[cur];
+    if (p < 0) break;
+    cur = p;
+  }
+
+  pathCellIds.reverse();
+
+  // Convert stateId => cellId (cellId is stored in the highest portion)
+  // stateId = ((cellId * dirCount + dir) * turnsCount + turns)
+  // => cellId = Math.floor(stateId / (dirCount * turnsCount))
+  const cellIdDiv = dirCount * turnsCount;
+  const cells = pathCellIds.map((sid) => {
+    const cellId = Math.floor(sid / cellIdDiv);
+    return { x: cellId % cols, z: (cellId / cols) | 0 };
+  });
+
+  return cells;
+}
+
+function isInsideGuideFloorXZ(point, guidePath, goalPosition, stage) {
+  const points = guidePath?.points ?? [];
+  const width = guidePath?.width ?? 0;
+  if (points.length < 2 || width <= 0) return false;
+
+  const px = point[0];
+  const pz = point[2];
+
+  // If a precomputed grid safe mask exists, always use it.
+  // (UI 12~15 uses gameplay stage 7~10 internally, so we cannot branch on `stage >= 12`.)
+  const meta = guidePath?.__gridMeta;
+  const mask = guidePath?.__gridSafeMask;
+  if (meta && mask) {
+    const { minX, minZ, cell, cols, rows } = meta;
+    const cx = Math.floor((px - minX) / cell);
+    const cz = Math.floor((pz - minZ) / cell);
+    if (cx < 0 || cx >= cols || cz < 0 || cz >= rows) return false;
+    return mask[cz * cols + cx] === 1;
+  }
+
+  // For stages 12~15 use tighter collision width to avoid delayed wall hit.
+  const halfVisualWidth =
+    stage >= 12
+      ? Math.max(0.05, width * 0.5 - (stage <= 13 ? 0.04 : 0.1))
+      : (width + 0.02) * 0.5;
+  const edgeTolerance = stage >= 12 ? 0 : 0.02;
+
+  const inRect = (cx, cz, w, d) =>
+    Math.abs(px - cx) <= w * 0.5 + edgeTolerance &&
+    Math.abs(pz - cz) <= d * 0.5 + edgeTolerance;
+  const inDisk = (cx, cz, radius) => {
+    const dx = px - cx;
+    const dz = pz - cz;
+    return dx * dx + dz * dz <= (radius + edgeTolerance) * (radius + edgeTolerance);
+  };
+
+  // Segment floor strips
+  for (let i = 0; i < points.length - 1; i += 1) {
+    if (pointToSegmentDistanceXZ(point, points[i], points[i + 1]) <= halfVisualWidth + edgeTolerance) {
+      return true;
+    }
+  }
+
+  // Corner fill squares
+  for (let i = 1; i < points.length - 1; i += 1) {
+    if (inRect(points[i][0], points[i][2], width + 0.02, width + 0.02)) return true;
+  }
+
+  // World center safe patch (same as GroundGuidePath fill rules)
+  if (stage >= 7 && (inRect(0, 0, 3.2, 3.2) || inDisk(0, 0, 1.75))) return true;
+
+  // Start/end widened patches are used for floor visuals, but on 12~15 they make
+  // wall collision too late. Keep them for lower stages only.
+  if (stage >= 12) {
+    return false;
+  }
+
+  // Start patch
+  const start = points[0];
+  if (start) {
+    if (inDisk(start[0], start[2], Math.max(width * 0.72, 0.95))) return true;
+    if (inRect(start[0], start[2], Math.max(3.0, width * 1.8), Math.max(3.0, width * 1.8))) return true;
+  }
+
+  // End patch
+  const end = goalPosition ?? points[points.length - 1];
+  if (end) {
+    if (inDisk(end[0], end[2], Math.max(width * 0.62, 1.05))) return true;
+    if (inRect(end[0], end[2], Math.max(width * 0.95, 2.2), Math.max(width * 0.95, 2.2))) return true;
+  }
+
+  return false;
+}
+
 function buildBentGuidePath(startPosition, goal, stage) {
   // 7~10 단계 경로는 코너 수를 제한해 가독성을 높임(과도한 반복 꺾임 방지)
   const sx = startPosition[0];
   const sz = startPosition[2];
   const gx = goal[0];
   const gz = goal[2];
-  const xDir = Math.sign(gx - sx) || 1;
-  const zDir = Math.sign(gz - sz) || -1;
-  const zMin = Math.min(sz, gz);
-  const zMax = Math.max(sz, gz);
-  const xMin = Math.min(sx, gx);
-  const xMax = Math.max(sx, gx);
+  const absDx = Math.abs(gx - sx);
+  const absDz = Math.abs(gz - sz);
+  const xBetween = (a, b, t) => a + (b - a) * t;
+  const zBetween = (a, b, t) => a + (b - a) * t;
 
   let knots;
   if (stage <= 8) {
-    // 코너 1개(L자): 가장 직관적인 경로
-    const variant = Math.floor(randomInRange(0, 2));
-    knots =
-      variant === 0
-        ? [
-            [sx, 0.03, sz],
-            [gx, 0.03, sz],
-            [gx, 0.03, gz],
-          ]
-        : [
-            [sx, 0.03, sz],
-            [sx, 0.03, gz],
-            [gx, 0.03, gz],
-          ];
-  } else {
-    // 코너 2개: 중간 포인트 1개만 사용 (반복 코너 금지)
-    const midX = clamp(randomInRange(xMin + 1.2, xMax - 1.2), xMin + 0.8, xMax - 0.8);
-    const midZ = clamp(randomInRange(zMin + 1.2, zMax - 1.2), zMin + 0.8, zMax - 0.8);
-    const variant = Math.floor(randomInRange(0, 2));
-    knots =
-      variant === 0
-        ? [
-            [sx, 0.03, sz],
-            [midX, 0.03, sz],
-            [midX, 0.03, gz],
-            [gx, 0.03, gz],
-          ]
-        : [
-            [sx, 0.03, sz],
-            [sx, 0.03, midZ],
-            [gx, 0.03, midZ],
-            [gx, 0.03, gz],
-          ];
-
-    // 목표 반대 방향으로 크게 꺾이는 경우 보정
-    if (Math.sign((knots[1]?.[0] ?? sx) - sx) !== xDir && Math.abs(gx - sx) > 2.5) {
-      knots[1][0] = sx + xDir * Math.max(0.8, Math.abs(gx - sx) * 0.35);
+    // 12~13(UI): 90도 1회 회전, 맨해튼 최단 경로(L자)
+    // 더 긴 축을 먼저 이동해 시작 안정성과 가독성을 높임.
+    if (absDx >= absDz) {
+      knots = [
+        [sx, 0.03, sz],
+        [gx, 0.03, sz],
+        [gx, 0.03, gz],
+      ];
+    } else {
+      knots = [
+        [sx, 0.03, sz],
+        [sx, 0.03, gz],
+        [gx, 0.03, gz],
+      ];
     }
-    if (Math.sign((knots[1]?.[2] ?? sz) - sz) !== zDir && Math.abs(gz - sz) > 2.5) {
-      knots[1][2] = sz + zDir * Math.max(0.8, Math.abs(gz - sz) * 0.35);
+  } else {
+    // 14~15(UI): 90도 2회 회전, 맨해튼 최단 경로(역방향 없이 축 분할)
+    // X 우선(X-Z-X) 또는 Z 우선(Z-X-Z)로 한 축을 두 구간으로 나눔.
+    // 단계별로 분할 비율을 다르게 둬 난이도를 조정:
+    // - stage 9(UI 14): 초반 구간을 짧게, 중간 직선 구간을 길게(비교적 쉬움)
+    // - stage 10(UI 15): 초반 구간을 길게, 후반 정렬 구간을 짧게(조금 더 까다로움)
+    const splitRatio = stage >= 10 ? 0.62 : 0.38;
+    if (absDx >= absDz) {
+      const splitX = xBetween(sx, gx, splitRatio);
+      knots = [
+        [sx, 0.03, sz],
+        [splitX, 0.03, sz],
+        [splitX, 0.03, gz],
+        [gx, 0.03, gz],
+      ];
+    } else {
+      const splitZ = zBetween(sz, gz, splitRatio);
+      knots = [
+        [sx, 0.03, sz],
+        [sx, 0.03, splitZ],
+        [gx, 0.03, splitZ],
+        [gx, 0.03, gz],
+      ];
     }
   }
 
@@ -246,6 +547,40 @@ function generateStageLayout(stage, startPosition) {
     let guidePath = null;
     let goalTry = 0;
 
+    const analyzeGridPath = (path) => {
+      if (!path || path.length < 2) return { bends: 0, segLens: [] };
+      const dirBetween = (a, b) => {
+        const dx = b.x - a.x;
+        const dz = b.z - a.z;
+        if (dx === 1 && dz === 0) return 0;
+        if (dx === -1 && dz === 0) return 1;
+        if (dx === 0 && dz === 1) return 2;
+        if (dx === 0 && dz === -1) return 3;
+        return -1;
+      };
+      let bends = 0;
+      const segLens = [];
+      let curLen = 1;
+      let curDir = dirBetween(path[0], path[1]);
+      for (let i = 1; i < path.length; i += 1) {
+        if (i === path.length - 1) {
+          curLen += 0;
+          break;
+        }
+        const nd = dirBetween(path[i], path[i + 1]);
+        if (nd === curDir) {
+          curLen += 1;
+        } else {
+          segLens.push(curLen);
+          bends += curDir >= 0 && nd >= 0 ? 1 : 0;
+          curDir = nd;
+          curLen = 1;
+        }
+      }
+      segLens.push(curLen);
+      return { bends, segLens };
+    };
+
     while (goalTry < 700) {
       goalTry += 1;
       const candidate = [
@@ -274,8 +609,142 @@ function generateStageLayout(stage, startPosition) {
       if (firstLen < minFirstLegLength) continue;
       if (finalLen < minFinalLegLength) continue;
 
-      goal = snappedGoal;
+      // Compute final landing point (goal) first (inset along last segment).
+      let landingGoal = snappedGoal;
+      const endPoint = points[points.length - 1];
+      const beforeEndPoint = points[points.length - 2];
+      if (endPoint) {
+        if (stage >= 12 && beforeEndPoint) {
+          const dx = endPoint[0] - beforeEndPoint[0];
+          const dz = endPoint[2] - beforeEndPoint[2];
+          const len = Math.hypot(dx, dz);
+          if (len > 1e-6) {
+            const landingRadius = getStageGoalRadius(stage) * 0.72;
+            const minInset = landingRadius + 0.42;
+            const maxInset = Math.max(0.18, len - 0.22);
+            const inset = Math.min(maxInset, Math.max(minInset, len * 0.2));
+            landingGoal = [endPoint[0] - (dx / len) * inset, goalY, endPoint[2] - (dz / len) * inset];
+          } else {
+            landingGoal = [endPoint[0], goalY, endPoint[2]];
+          }
+        } else {
+          landingGoal = [endPoint[0], goalY, endPoint[2]];
+        }
+      }
+
+      // Pathfinding grid must include both start and goal.
+      const gridCell = 0.1;
+      const gridMargin = 0.8;
+      const gridMinX =
+        Math.floor((Math.min(stageGoalConfig.xMin, startPosition[0], landingGoal[0]) - gridMargin) / gridCell) *
+        gridCell;
+      const gridMaxX =
+        Math.ceil((Math.max(stageGoalConfig.xMax, startPosition[0], landingGoal[0]) + gridMargin) / gridCell) *
+        gridCell;
+      const gridMinZ =
+        Math.floor((Math.min(stageGoalConfig.zMin, startPosition[2], landingGoal[2]) - gridMargin) / gridCell) *
+        gridCell;
+      const gridMaxZ =
+        Math.ceil((Math.max(stageGoalConfig.zMax, startPosition[2], landingGoal[2]) + gridMargin) / gridCell) *
+        gridCell;
+      const cols = Math.max(1, Math.ceil((gridMaxX - gridMinX) / gridCell));
+      const rows = Math.max(1, Math.ceil((gridMaxZ - gridMinZ) / gridCell));
+
+      // internal stage: 7~8 => UI 12~13 (1 bend), 9~10 => UI 14~15 (2 bends)
+      const desiredBends = stage >= 9 ? 2 : 1;
+      const gridPathCells = computeGridPathCells4DirTurnAStar({
+        gridMinX,
+        gridMinZ,
+        cellSize: gridCell,
+        cols,
+        rows,
+        startWorld: startPosition,
+        goalWorld: landingGoal,
+        desiredBends,
+        allowFewerBends: stage < 9, // 14~15는 반드시 2번 꺾임 유지
+        blockedMask: null,
+      });
+
+      if (!gridPathCells || gridPathCells.length < 2) continue;
+      const analysis = analyzeGridPath(gridPathCells);
+      if (analysis.bends !== desiredBends) continue;
+
+      // Prevent "almost straight" trivialization on 15: enforce minimum straight segment lengths.
+      if (desiredBends === 2) {
+        const minSegCells = stage >= 10 ? 10 : 8; // 15단계(10) 더 엄격
+        if (analysis.segLens.some((len) => len < minSegCells)) continue;
+      }
+
+      goal = landingGoal;
       guidePath = candidatePath;
+      // attach grid info for rendering/stamping
+      guidePath.__gridMeta = { minX: gridMinX, minZ: gridMinZ, cell: gridCell, cols, rows };
+      guidePath.__gridPathCells = gridPathCells;
+
+      // Precompute dilated safe mask once (used for both rendering and wall collision).
+      {
+        const mask = new Uint8Array(cols * rows);
+        const rCells = Math.max(1, Math.ceil(((guidePath.width ?? 2.1) * 0.5 + 0.22 * gridCell) / gridCell));
+        const idx = (x, z) => z * cols + x;
+        const stampRect = (x0, x1, z0, z1) => {
+          const xx0 = Math.max(0, Math.min(x0, x1));
+          const xx1 = Math.min(cols - 1, Math.max(x0, x1));
+          const zz0 = Math.max(0, Math.min(z0, z1));
+          const zz1 = Math.min(rows - 1, Math.max(z0, z1));
+          for (let zz = zz0; zz <= zz1; zz += 1) {
+            for (let xx = xx0; xx <= xx1; xx += 1) mask[idx(xx, zz)] = 1;
+          }
+        };
+        const stampSquare = (cx, cz) => stampRect(cx - rCells, cx + rCells, cz - rCells, cz + rCells);
+        const dirBetween = (a, b) => {
+          const dx = b.x - a.x;
+          const dz = b.z - a.z;
+          if (dx === 1 && dz === 0) return 0;
+          if (dx === -1 && dz === 0) return 1;
+          if (dx === 0 && dz === 1) return 2;
+          if (dx === 0 && dz === -1) return 3;
+          return -1;
+        };
+        const stampSegment = (a, b, dir) => {
+          if (dir === 0 || dir === 1) {
+            const x0 = Math.min(a.x, b.x);
+            const x1 = Math.max(a.x, b.x);
+            const z = a.z;
+            stampRect(x0 - rCells, x1 + rCells, z - rCells, z + rCells);
+          } else if (dir === 2 || dir === 3) {
+            const z0 = Math.min(a.z, b.z);
+            const z1 = Math.max(a.z, b.z);
+            const x = a.x;
+            stampRect(x - rCells, x + rCells, z0 - rCells, z1 + rCells);
+          }
+        };
+
+        // caps
+        stampSquare(gridPathCells[0].x, gridPathCells[0].z);
+        stampSquare(gridPathCells[gridPathCells.length - 1].x, gridPathCells[gridPathCells.length - 1].z);
+        // bends
+        for (let k = 1; k < gridPathCells.length - 1; k += 1) {
+          const d1 = dirBetween(gridPathCells[k - 1], gridPathCells[k]);
+          const d2 = dirBetween(gridPathCells[k], gridPathCells[k + 1]);
+          if (d1 >= 0 && d2 >= 0 && d1 !== d2) stampSquare(gridPathCells[k].x, gridPathCells[k].z);
+        }
+        // compressed segments
+        let k = 0;
+        while (k < gridPathCells.length - 1) {
+          const d = dirBetween(gridPathCells[k], gridPathCells[k + 1]);
+          let j = k + 1;
+          while (j < gridPathCells.length - 1) {
+            const dn = dirBetween(gridPathCells[j], gridPathCells[j + 1]);
+            if (dn !== d) break;
+            j += 1;
+          }
+          if (d >= 0) stampSegment(gridPathCells[k], gridPathCells[j], d);
+          else stampSquare(gridPathCells[k].x, gridPathCells[k].z);
+          k = j;
+        }
+
+        guidePath.__gridSafeMask = mask;
+      }
       break;
     }
 
@@ -286,35 +755,46 @@ function generateStageLayout(stage, startPosition) {
         Math.round(goal[2] / snap) * snap,
       ];
       guidePath = buildBentGuidePath(startPosition, goal, stage);
+      // If we fell back, we still need a grid path/meta for rendering; keep it permissive.
+      const gridCell = 0.1;
+      const gridMargin = 0.8;
+      const gridMinX =
+        Math.floor((Math.min(stageGoalConfig.xMin, startPosition[0], goal[0]) - gridMargin) / gridCell) *
+        gridCell;
+      const gridMaxX =
+        Math.ceil((Math.max(stageGoalConfig.xMax, startPosition[0], goal[0]) + gridMargin) / gridCell) *
+        gridCell;
+      const gridMinZ =
+        Math.floor((Math.min(stageGoalConfig.zMin, startPosition[2], goal[2]) - gridMargin) / gridCell) *
+        gridCell;
+      const gridMaxZ =
+        Math.ceil((Math.max(stageGoalConfig.zMax, startPosition[2], goal[2]) + gridMargin) / gridCell) *
+        gridCell;
+      const cols = Math.max(1, Math.ceil((gridMaxX - gridMinX) / gridCell));
+      const rows = Math.max(1, Math.ceil((gridMaxZ - gridMinZ) / gridCell));
+      const desiredBends = stage >= 9 ? 2 : 1;
+      const gridPathCells = computeGridPathCells4DirTurnAStar({
+        gridMinX,
+        gridMinZ,
+        cellSize: gridCell,
+        cols,
+        rows,
+        startWorld: startPosition,
+        goalWorld: goal,
+        desiredBends,
+        allowFewerBends: true,
+        blockedMask: null,
+      });
+      guidePath.__gridMeta = { minX: gridMinX, minZ: gridMinZ, cell: gridCell, cols, rows };
+      guidePath.__gridPathCells = gridPathCells;
     }
-    const points = guidePath.points ?? [];
-    const endPoint = points[points.length - 1];
-    const beforeEndPoint = points[points.length - 2];
-    if (endPoint && beforeEndPoint) {
-      // 착륙 지점은 마지막 통로 중심선 위에서 아주 소량만 안쪽으로 이동.
-      // 그리고 0.1 그리드에 정렬해 바닥 셀 중심과 시각적으로 일치시킨다.
-      const dx = endPoint[0] - beforeEndPoint[0];
-      const dz = endPoint[2] - beforeEndPoint[2];
-      const segLen = Math.hypot(dx, dz);
-      if (segLen > 1e-6) {
-        const dirX = dx / segLen;
-        const dirZ = dz / segLen;
-        const inset = Math.min(0.14, Math.max(0.06, segLen * 0.05));
-        const gx = endPoint[0] - dirX * inset;
-        const gz = endPoint[2] - dirZ * inset;
-        goal = [Math.round(gx * 10) / 10, goalY, Math.round(gz * 10) / 10];
-      } else {
-        goal = [Math.round(endPoint[0] * 10) / 10, goalY, Math.round(endPoint[2] * 10) / 10];
-      }
-    } else if (endPoint) {
-      goal = [Math.round(endPoint[0] * 10) / 10, goalY, Math.round(endPoint[2] * 10) / 10];
-    }
-
     return {
       goalPosition: goal,
       obstaclePositions: [],
       obstacleSize,
       guidePath,
+      gridMeta: guidePath?.__gridMeta ?? null,
+      gridPathCells: guidePath?.__gridPathCells ?? null,
     };
   }
 
@@ -341,6 +821,13 @@ function generateStageLayout(stage, startPosition) {
   const perpX = -normPathZ;
   const perpZ = normPathX;
 
+  // Stage 9~11 (UI) == gameplay stage 4~6: keep obstacles apart by drone width.
+  // Min center distance = obstacleSize + (droneWidth * multiplier).
+  const droneWidth = 1.0;
+  const minGapMultiplierByStage = stage === 4 ? 2.5 : stage === 5 ? 2.0 : stage === 6 ? 1.5 : 0;
+  const minObstacleCenterDist =
+    minGapMultiplierByStage > 0 ? obstacleSize + droneWidth * minGapMultiplierByStage : obstacleSize * 1.85;
+
   let safety = 0;
   while (obstacles.length < obstacleCount && safety < 8000) {
     safety += 1;
@@ -362,7 +849,7 @@ function generateStageLayout(stage, startPosition) {
 
     let tooClose = false;
     for (let i = 0; i < obstacles.length; i += 1) {
-      if (distanceXZ(candidate, obstacles[i]) < obstacleSize * 1.85) {
+      if (distanceXZ(candidate, obstacles[i]) < minObstacleCenterDist) {
         tooClose = true;
         break;
       }
@@ -385,10 +872,10 @@ function generateStageLayout(stage, startPosition) {
       ];
 
       const tooCloseExisting = obstacles.some(
-        (p) => distanceXZ(candidate, p) < obstacleSize * 1.85
+        (p) => distanceXZ(candidate, p) < minObstacleCenterDist
       );
       const tooCloseFallback = fallback.some(
-        (p) => distanceXZ(candidate, p) < obstacleSize * 1.85
+        (p) => distanceXZ(candidate, p) < minObstacleCenterDist
       );
 
       if (!tooCloseExisting && !tooCloseFallback) fallback.push(candidate);
@@ -412,13 +899,36 @@ function generateStageLayout(stage, startPosition) {
       if (distanceXZ(candidate, startPosition) < 3.1) continue;
       if (distanceXZ(candidate, goal) < goalObstacleClearance) continue;
       const tooClose = obstacles.some(
-        (p) => distanceXZ(candidate, p) < obstacleSize * 1.85
+        (p) => distanceXZ(candidate, p) < minObstacleCenterDist
       );
       if (!tooClose) obstacles.push(candidate);
     }
   }
 
-  return { goalPosition: goal, obstaclePositions: obstacles, obstacleSize, guidePath: null };
+  // UI 9~11단계(gameplay stage 4~6): restrict movement to a rectangle that contains
+  // start position + goal + all obstacles, to encourage passing between obstacles.
+  let movementRect = null;
+  if (stage >= 4 && stage <= 6 && obstacles.length > 0) {
+    let minX = Math.min(startPosition[0], goal[0], ...obstacles.map((o) => o[0]));
+    let maxX = Math.max(startPosition[0], goal[0], ...obstacles.map((o) => o[0]));
+    let minZ = Math.min(startPosition[2], goal[2], ...obstacles.map((o) => o[2]));
+    let maxZ = Math.max(startPosition[2], goal[2], ...obstacles.map((o) => o[2]));
+    // Add a margin: obstacle half-size + some drone clearance
+    const margin = obstacleSize * 0.7 + 0.9;
+    minX -= margin;
+    maxX += margin;
+    minZ -= margin;
+    maxZ += margin;
+    movementRect = { minX, maxX, minZ, maxZ };
+  }
+
+  return {
+    goalPosition: goal,
+    obstaclePositions: obstacles,
+    obstacleSize,
+    guidePath: null,
+    movementRect,
+  };
 }
 
 /* =========================
@@ -500,6 +1010,34 @@ function Ground() {
   );
 }
 
+function ControlYellowFloor({ uiStage }) {
+  // 1~11 단계: 전체 바닥을 노랑 계열로 반투명 표시
+  if (uiStage > 11) return null;
+  // UI 9~11단계는 이동 가능 영역을 직사각형으로 제한하므로, 전체 바닥 표시를 끈다.
+  if (uiStage >= 9 && uiStage <= 11) return null;
+  const size = uiStage <= 6 ? 26 : 34;
+  return (
+    <mesh position={[0, 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+      <planeGeometry args={[size, size]} />
+      <meshBasicMaterial color="#f59e0b" transparent opacity={0.24} depthWrite={false} />
+    </mesh>
+  );
+}
+
+function MovementRectFloor({ movementRect }) {
+  if (!movementRect) return null;
+  const width = Math.max(0.1, movementRect.maxX - movementRect.minX);
+  const depth = Math.max(0.1, movementRect.maxZ - movementRect.minZ);
+  const cx = (movementRect.minX + movementRect.maxX) / 2;
+  const cz = (movementRect.minZ + movementRect.maxZ) / 2;
+  return (
+    <mesh position={[cx, 0.02, cz]} rotation={[-Math.PI / 2, 0, 0]}>
+      <planeGeometry args={[width, depth]} />
+      <meshBasicMaterial color="#fbbf24" transparent opacity={0.38} depthWrite={false} />
+    </mesh>
+  );
+}
+
 function Goal({ position, stage, uiStage }) {
   const goalLabel = uiStage >= 12 ? "착륙 지점" : "목표물";
   const showGoalLabel = uiStage >= 6 && uiStage <= 15;
@@ -536,7 +1074,7 @@ function Goal({ position, stage, uiStage }) {
 
   // 7~10단계: 바닥 착륙 목표(패드)
   const radius = getStageGoalRadius(stage);
-  const landingRadius = radius * 0.82;
+  const landingRadius = uiStage >= 12 ? radius * 0.72 : radius * 0.82;
   return (
     <group>
       <BoxShadow
@@ -601,7 +1139,7 @@ function Obstacle({ position, size = 1.5, uiStage }) {
   );
 }
 
-function DroneVisual({ spinActive = true, spinSpeed = 34, spinStateRef = null }) {
+function DroneVisual({ spinActive = true, spinSpeed = 34, spinStateRef = null, sizeScale = 0.82 }) {
   const armY = 0.08;
   const armOffset = 0.28;
   const motorOffset = 0.43;
@@ -624,18 +1162,24 @@ function DroneVisual({ spinActive = true, spinSpeed = 34, spinStateRef = null })
       rotor.rotation.y += spinSpeed * delta;
     }
     if (wingTiltRef.current && spinStateRef?.current) {
-      // Make wing assembly visibly bank/pitch with right stick movement.
-      const sx = clamp(spinStateRef.current.rightStick?.x ?? 0, -1, 1);
-      const sy = clamp(spinStateRef.current.rightStick?.y ?? 0, -1, 1);
-      const targetPitch = sy * 0.58;
-      const targetRoll = -sx * 0.5;
+      // Reflect both joystick and keyboard movement in wing tilt.
+      const keyX =
+        (spinStateRef.current.keys?.left ? -1 : 0) +
+        (spinStateRef.current.keys?.right ? 1 : 0);
+      const keyY =
+        (spinStateRef.current.keys?.forward ? -1 : 0) +
+        (spinStateRef.current.keys?.backward ? 1 : 0);
+      const sx = clamp((spinStateRef.current.rightStick?.x ?? 0) + keyX, -1, 1);
+      const sy = clamp((spinStateRef.current.rightStick?.y ?? 0) + keyY, -1, 1);
+      const targetPitch = sy * 0.29;
+      const targetRoll = -sx * 0.25;
       wingTiltRef.current.rotation.x += (targetPitch - wingTiltRef.current.rotation.x) * 0.22;
       wingTiltRef.current.rotation.z += (targetRoll - wingTiltRef.current.rotation.z) * 0.22;
     }
   });
 
   return (
-    <group>
+    <group scale={[sizeScale, sizeScale, sizeScale]}>
       {/* main body */}
       <mesh>
         <boxGeometry args={[0.72, 0.16, 0.5]} />
@@ -719,7 +1263,13 @@ function DroneVisual({ spinActive = true, spinSpeed = 34, spinStateRef = null })
   );
 }
 
-const GroundGuidePath = memo(function GroundGuidePath({ guidePath, goalPosition = null, stage }) {
+const GroundGuidePath = memo(function GroundGuidePath({
+  guidePath,
+  goalPosition = null,
+  stage,
+  gridMeta = null,
+  gridPathCells = null,
+}) {
   const points = useMemo(() => guidePath?.points ?? [], [guidePath]);
   const width = guidePath?.width ?? 0;
   if (points.length < 2 || width <= 0) return null;
@@ -727,36 +1277,58 @@ const GroundGuidePath = memo(function GroundGuidePath({ guidePath, goalPosition 
   const floorThickness = 0.03;
   const wallThickness = 0.08;
   const wallHeight = 18;
-  // 12~15단계(게임플레이 7~10)는 셀 해상도를 완만히 낮춰 렌더 비용을 줄인다.
-  const cell = stage >= 7 ? 0.14 : 0.1;
+  // 12~15단계(게임플레이 7~10) 끝 구간 중심 오차를 줄이기 위해 해상도를 조금 높인다.
+  const useGridMask = stage >= 12 && gridMeta && gridPathCells && Array.isArray(gridPathCells) && gridMeta.cols && gridMeta.rows;
+  const cell = stage >= 12 ? (gridMeta?.cell ?? 0.1) : stage >= 7 ? 0.14 : 0.1;
+  // When rasterizing onto the grid, cells exactly on a joint/knot boundary can be skipped.
+  // Add a small padding so segment fill visually continues through kink points.
+  const rasterPadding = stage >= 12 ? cell * 0.22 : cell * 0.12;
   const wallOuterOffset = wallThickness * 0.5 + 0.08;
   const centerSafeRadius = 1.75;
   const centerSafeSize = 3.2;
 
   // 벽은 "바닥으로 실제 칠해진 영역"의 외곽선에서 생성
-  let minX = Infinity;
-  let maxX = -Infinity;
-  let minZ = Infinity;
-  let maxZ = -Infinity;
-  for (const p of points) {
-    minX = Math.min(minX, p[0]);
-    maxX = Math.max(maxX, p[0]);
-    minZ = Math.min(minZ, p[2]);
-    maxZ = Math.max(maxZ, p[2]);
+  // stage>=12에서는 gridMeta로부터 그리드를 고정(경로 마스크와 정렬)
+  let minX;
+  let minZ;
+  let cols;
+  let rows;
+  if (useGridMask) {
+    minX = gridMeta.minX;
+    minZ = gridMeta.minZ;
+    cols = gridMeta.cols;
+    rows = gridMeta.rows;
+  } else {
+    let maxX = -Infinity;
+    let maxZ = -Infinity;
+    minX = Infinity;
+    minZ = Infinity;
+    for (const p of points) {
+      minX = Math.min(minX, p[0]);
+      maxX = Math.max(maxX, p[0]);
+      minZ = Math.min(minZ, p[2]);
+      maxZ = Math.max(maxZ, p[2]);
+    }
+    const pad = cell * 2;
+    minX -= pad;
+    maxX += pad;
+    minZ -= pad;
+    maxZ += pad;
+    // 중심([0,0]) 강제 안전구역이 항상 그리드에 포함되도록 경계 확장.
+    const centerPad = Math.max(centerSafeRadius + cell * 2, centerSafeSize * 0.5 + cell * 2);
+    minX = Math.min(minX, -centerPad);
+    maxX = Math.max(maxX, centerPad);
+    minZ = Math.min(minZ, -centerPad);
+    maxZ = Math.max(maxZ, centerPad);
+    // Snap bounds to cell grid to reduce directional raster bias near endpoints.
+    minX = Math.floor(minX / cell) * cell;
+    maxX = Math.ceil(maxX / cell) * cell;
+    minZ = Math.floor(minZ / cell) * cell;
+    maxZ = Math.ceil(maxZ / cell) * cell;
+    cols = Math.max(1, Math.ceil((maxX - minX) / cell));
+    rows = Math.max(1, Math.ceil((maxZ - minZ) / cell));
   }
-  const pad = cell * 2;
-  minX -= pad;
-  maxX += pad;
-  minZ -= pad;
-  maxZ += pad;
-  // 중심([0,0]) 강제 안전구역이 항상 그리드에 포함되도록 경계 확장.
-  const centerPad = Math.max(centerSafeRadius + cell * 2, centerSafeSize * 0.5 + cell * 2);
-  minX = Math.min(minX, -centerPad);
-  maxX = Math.max(maxX, centerPad);
-  minZ = Math.min(minZ, -centerPad);
-  maxZ = Math.max(maxZ, centerPad);
-  const cols = Math.max(1, Math.ceil((maxX - minX) / cell));
-  const rows = Math.max(1, Math.ceil((maxZ - minZ) / cell));
+
   const fillGrid = new Uint8Array(cols * rows);
   const idx = (x, z) => z * cols + x;
   const markRect = (cx, cz, yaw, w, d) => {
@@ -775,18 +1347,19 @@ const GroundGuidePath = memo(function GroundGuidePath({ guidePath, goalPosition 
         const wx = minX + (cxi + 0.5) * cell;
         const lx = (wx - cx) * cos + (wz - cz) * sin;
         const lz = -(wx - cx) * sin + (wz - cz) * cos;
-        if (Math.abs(lx) <= hw && Math.abs(lz) <= hd) {
+        if (Math.abs(lx) <= hw + rasterPadding && Math.abs(lz) <= hd + rasterPadding) {
           fillGrid[idx(cxi, rz)] = 1;
         }
       }
     }
   };
   const markDisk = (cx, cz, radius) => {
+    const padded = radius + rasterPadding;
     const c0 = Math.max(0, Math.floor((cx - radius - minX) / cell));
     const c1 = Math.min(cols - 1, Math.ceil((cx + radius - minX) / cell));
     const r0 = Math.max(0, Math.floor((cz - radius - minZ) / cell));
     const r1 = Math.min(rows - 1, Math.ceil((cz + radius - minZ) / cell));
-    const r2 = radius * radius;
+    const r2 = padded * padded;
     for (let rz = r0; rz <= r1; rz += 1) {
       const wz = minZ + (rz + 0.5) * cell;
       for (let cxi = c0; cxi <= c1; cxi += 1) {
@@ -800,70 +1373,200 @@ const GroundGuidePath = memo(function GroundGuidePath({ guidePath, goalPosition 
     }
   };
 
-  for (let i = 0; i < points.length - 1; i += 1) {
-    const a = points[i];
-    const b = points[i + 1];
-    const dx = b[0] - a[0];
-    const dz = b[2] - a[2];
-    const len = Math.hypot(dx, dz);
-    if (len < 1e-6) continue;
-    const yaw = Math.atan2(dx, dz);
-    const midX = (a[0] + b[0]) * 0.5;
-    const midZ = (a[2] + b[2]) * 0.5;
-    markRect(midX, midZ, yaw, width + 0.02, len + 0.02);
-  }
-  for (let i = 1; i < points.length - 1; i += 1) {
-    const p = points[i];
-    markRect(p[0], p[2], 0, width + 0.02, width + 0.02);
-  }
-  // 월드 중심([0, 0, 0]) 시작 안전 구역:
-  // 벽 생성 전에 바닥을 먼저 확보해 시작 시 벽에 붙어 보이지 않게 함.
-  markRect(0, 0, 0, centerSafeSize, centerSafeSize);
-  markDisk(0, 0, centerSafeRadius);
-  // 시작 지점은 추가 반경으로 채워 드론이 벽 밖으로 걸치지 않게 함
-  const start = points[0];
-  if (start) {
-    markDisk(start[0], start[2], Math.max(width * 0.72, 0.95));
-    // 드론 본체(약 1x1)가 시작 시 확실히 내부에 오도록 안전 박스 추가
-    markRect(start[0], start[2], 0, Math.max(3.0, width * 1.8), Math.max(3.0, width * 1.8));
-  }
-  // 착륙 지점 중심을 기준으로 바닥 캡을 만들어 시각적 중심 불일치 방지.
-  const end = goalPosition ?? points[points.length - 1];
-  if (end) {
-    markDisk(end[0], end[2], Math.max(width * 0.62, 1.05));
-    markRect(end[0], end[2], 0, Math.max(width * 0.95, 2.2), Math.max(width * 0.95, 2.2));
+  if (stage >= 12) {
+    if (useGridMask) {
+      // 12~15: use the precomputed safe mask from generateStageLayout (shared with collision & walls)
+      const mask = guidePath?.__gridSafeMask;
+      if (mask && mask.length === fillGrid.length) {
+        fillGrid.set(mask);
+      }
+    } else {
+      // fallback: no gridPathCells => keep previous guidePath-based stamping
+      const halfVisualWidth =
+        stage >= 12 ? Math.max(0.05, width * 0.5 - (stage <= 13 ? 0.04 : 0.1)) : (width + 0.02) * 0.5;
+      const edgePad = rasterPadding * 0.6;
+      const tHalf = halfVisualWidth + edgePad;
+      const brushHalf = tHalf * 1.02;
+      const landingPoint =
+        goalPosition && Array.isArray(goalPosition) ? goalPosition : points[points.length - 1];
+      const startPoint = points[0];
+
+      const rangeForCenters = (wMin, wMax, origin, count) => {
+        const i0 = Math.ceil((wMin - origin) / cell - 0.5);
+        const i1 = Math.floor((wMax - origin) / cell - 0.5);
+        return [Math.max(0, i0), Math.min(count - 1, i1)];
+      };
+
+      const fillRect = (x0, x1, z0, z1) => {
+        const [c0, c1] = rangeForCenters(Math.min(x0, x1), Math.max(x0, x1), minX, cols);
+        const [r0, r1] = rangeForCenters(Math.min(z0, z1), Math.max(z0, z1), minZ, rows);
+        if (c1 < c0 || r1 < r0) return;
+        for (let rz = r0; rz <= r1; rz += 1) {
+          for (let cxi = c0; cxi <= c1; cxi += 1) {
+            fillGrid[idx(cxi, rz)] = 1;
+          }
+        }
+      };
+
+      const fillSquareBrush = (px, pz) => {
+        fillRect(px - brushHalf, px + brushHalf, pz - brushHalf, pz + brushHalf);
+      };
+
+      for (let i = 0; i < points.length - 1; i += 1) {
+        const a = points[i];
+        const isLastSeg = i === points.length - 2;
+        const b = isLastSeg ? landingPoint : points[i + 1];
+        const dx = b[0] - a[0];
+        const dz = b[2] - a[2];
+
+        const alongX = Math.abs(dz) <= 1e-6;
+        const alongZ = Math.abs(dx) <= 1e-6;
+
+        if (alongX) {
+          const xMin = Math.min(a[0], b[0]) - edgePad;
+          const xMax = Math.max(a[0], b[0]) + edgePad;
+          const z0 = a[2];
+          fillRect(xMin, xMax, z0 - tHalf, z0 + tHalf);
+        } else if (alongZ) {
+          const zMin = Math.min(a[2], b[2]) - edgePad;
+          const zMax = Math.max(a[2], b[2]) + edgePad;
+          const x0 = a[0];
+          fillRect(x0 - tHalf, x0 + tHalf, zMin, zMax);
+        } else {
+          const xMin = Math.min(a[0], b[0]) - tHalf;
+          const xMax = Math.max(a[0], b[0]) + tHalf;
+          const zMin = Math.min(a[2], b[2]) - tHalf;
+          const zMax = Math.max(a[2], b[2]) + tHalf;
+          fillRect(xMin, xMax, zMin, zMax);
+        }
+      }
+
+      if (startPoint) fillSquareBrush(startPoint[0], startPoint[2]);
+      for (let i = 1; i < points.length - 1; i += 1) {
+        const p = points[i];
+        fillSquareBrush(p[0], p[2]);
+      }
+      if (landingPoint) fillSquareBrush(landingPoint[0], landingPoint[2]);
+    }
+  } else {
+    // 기존 로직(하위 단계): markRect/markDisk 기반으로 세그먼트를 사각형/원으로 채움
+    for (let i = 0; i < points.length - 1; i += 1) {
+      const a = points[i];
+      const b = points[i + 1];
+      const dx = b[0] - a[0];
+      const dz = b[2] - a[2];
+      const len = Math.hypot(dx, dz);
+      if (len < 1e-6) continue;
+      const yaw = Math.atan2(dx, dz);
+      const midX = (a[0] + b[0]) * 0.5;
+      const midZ = (a[2] + b[2]) * 0.5;
+      markRect(midX, midZ, yaw, width + 0.02, len + 0.02);
+    }
+    for (let i = 1; i < points.length - 1; i += 1) {
+      const p = points[i];
+      markRect(p[0], p[2], 0, width + 0.02, width + 0.02);
+    }
+    // 월드 중심([0, 0, 0]) 시작 안전 구역:
+    // 벽 생성 전에 바닥을 먼저 확보해 시작 시 벽에 붙어 보이지 않게 함.
+    markRect(0, 0, 0, centerSafeSize, centerSafeSize);
+    markDisk(0, 0, centerSafeRadius);
+    // 시작 지점은 추가 반경으로 채워 드론이 벽 밖으로 걸치지 않게 함
+    const start = points[0];
+    if (start) {
+      markDisk(start[0], start[2], Math.max(width * 0.72, 0.95));
+      // 드론 본체(약 1x1)가 시작 시 확실히 내부에 오도록 안전 박스 추가
+      markRect(start[0], start[2], 0, Math.max(3.0, width * 1.8), Math.max(3.0, width * 1.8));
+    }
+    // 착륙 지점 중심 보강: 과한 확장은 끝구간 중심 오차를 키우므로 12~15에서는 축소.
+    const end = goalPosition ?? points[points.length - 1];
+    if (end) {
+      markDisk(end[0], end[2], Math.max(width * 0.62, 1.05));
+      markRect(end[0], end[2], 0, Math.max(width * 0.95, 2.2), Math.max(width * 0.95, 2.2));
+    }
   }
 
   const has = (x, z) => x >= 0 && x < cols && z >= 0 && z < rows && fillGrid[idx(x, z)] === 1;
   const floorMeshes = [];
-  for (let z = 0; z < rows; z += 1) {
-    for (let x = 0; x < cols; x += 1) {
-      if (!has(x, z)) continue;
-      const wx = minX + (x + 0.5) * cell;
-      const wz = minZ + (z + 0.5) * cell;
-      floorMeshes.push(
-        <mesh key={`f-${x}-${z}`} position={[wx, 0.03, wz]}>
-          <boxGeometry args={[cell + 0.02, floorThickness, cell + 0.02]} />
-          <meshBasicMaterial color="#38bdf8" transparent opacity={0.32} depthWrite={false} />
-        </mesh>
-      );
+  if (stage >= 12) {
+    // stage>=12에서는 셀 단위 렌더링 대신, 연속된 filled 셀을 사각형으로 merge해서
+    // mesh 개수를 줄인다.
+    const visited = new Uint8Array(cols * rows);
+    for (let z = 0; z < rows; z += 1) {
+      for (let x = 0; x < cols; x += 1) {
+        const baseIdx = idx(x, z);
+        if (fillGrid[baseIdx] !== 1 || visited[baseIdx] === 1) continue;
+
+        // width 확장
+        let x2 = x;
+        while (x2 + 1 < cols) {
+          const nextIdx = idx(x2 + 1, z);
+          if (fillGrid[nextIdx] !== 1 || visited[nextIdx] === 1) break;
+          x2 += 1;
+        }
+        const w = x2 - x + 1;
+
+        // height 확장
+        let h = 1;
+        outer: for (let zz = z + 1; zz < rows; zz += 1) {
+          for (let xx = x; xx <= x2; xx += 1) {
+            const testIdx = idx(xx, zz);
+            if (fillGrid[testIdx] !== 1 || visited[testIdx] === 1) break outer;
+          }
+          h += 1;
+        }
+
+        // 방문 마킹
+        for (let zz = z; zz < z + h; zz += 1) {
+          for (let xx = x; xx < x + w; xx += 1) {
+            visited[idx(xx, zz)] = 1;
+          }
+        }
+
+        const wx = minX + (x + w / 2) * cell;
+        const wz = minZ + (z + h / 2) * cell;
+        const margin = 0.02;
+        floorMeshes.push(
+          <mesh key={`f-m-${x}-${z}-${w}-${h}`} position={[wx, 0.03, wz]}>
+            <boxGeometry args={[w * cell + margin, floorThickness, h * cell + margin]} />
+            <meshBasicMaterial color="#38bdf8" transparent opacity={0.32} depthWrite={false} />
+          </mesh>
+        );
+      }
     }
-  }
-  const eE = Array.from({ length: rows }, () => new Uint8Array(cols));
-  const eW = Array.from({ length: rows }, () => new Uint8Array(cols));
-  const eN = Array.from({ length: rows }, () => new Uint8Array(cols));
-  const eS = Array.from({ length: rows }, () => new Uint8Array(cols));
-  for (let z = 0; z < rows; z += 1) {
-    for (let x = 0; x < cols; x += 1) {
-      if (!has(x, z)) continue;
-      eE[z][x] = !has(x + 1, z) ? 1 : 0;
-      eW[z][x] = !has(x - 1, z) ? 1 : 0;
-      eN[z][x] = !has(x, z - 1) ? 1 : 0;
-      eS[z][x] = !has(x, z + 1) ? 1 : 0;
+  } else {
+    for (let z = 0; z < rows; z += 1) {
+      for (let x = 0; x < cols; x += 1) {
+        if (!has(x, z)) continue;
+        const wx = minX + (x + 0.5) * cell;
+        const wz = minZ + (z + 0.5) * cell;
+        floorMeshes.push(
+          <mesh key={`f-${x}-${z}`} position={[wx, 0.03, wz]}>
+            <boxGeometry args={[cell + 0.02, floorThickness, cell + 0.02]} />
+            <meshBasicMaterial color="#38bdf8" transparent opacity={0.32} depthWrite={false} />
+          </mesh>
+        );
+      }
     }
   }
 
-  const wallMeshes = [];
+  // Debug markers (red spheres) removed: floor generation is now stable and grid-based.
+  let wallMeshes = [];
+  // 벽은 "바닥으로 실제 칠해진 영역"의 외곽선에서 생성 (stage>=12 포함)
+  {
+    const eE = Array.from({ length: rows }, () => new Uint8Array(cols));
+    const eW = Array.from({ length: rows }, () => new Uint8Array(cols));
+    const eN = Array.from({ length: rows }, () => new Uint8Array(cols));
+    const eS = Array.from({ length: rows }, () => new Uint8Array(cols));
+    for (let z = 0; z < rows; z += 1) {
+      for (let x = 0; x < cols; x += 1) {
+        if (!has(x, z)) continue;
+        eE[z][x] = !has(x + 1, z) ? 1 : 0;
+        eW[z][x] = !has(x - 1, z) ? 1 : 0;
+        eN[z][x] = !has(x, z - 1) ? 1 : 0;
+        eS[z][x] = !has(x, z + 1) ? 1 : 0;
+      }
+    }
+
   // E/W: Z축 방향으로 연속 구간 병합
   for (let x = 0; x < cols; x += 1) {
     for (const side of ["E", "W"]) {
@@ -884,7 +1587,7 @@ const GroundGuidePath = memo(function GroundGuidePath({ guidePath, goalPosition 
         wallMeshes.push(
           <mesh key={`mw-${side}-${x}-${z0}`} position={[wx, 0.03 + wallHeight * 0.5, wz]}>
             <boxGeometry args={[wallThickness, wallHeight, len]} />
-            <meshStandardMaterial color="#64748b" transparent opacity={0.45} />
+            <meshStandardMaterial color="#cbd5e1" transparent opacity={0.55} />
           </mesh>
         );
       }
@@ -910,11 +1613,12 @@ const GroundGuidePath = memo(function GroundGuidePath({ guidePath, goalPosition 
         wallMeshes.push(
           <mesh key={`mw-${side}-${z}-${x0}`} position={[wx, 0.03 + wallHeight * 0.5, wz]}>
             <boxGeometry args={[len, wallHeight, wallThickness]} />
-            <meshStandardMaterial color="#64748b" transparent opacity={0.45} />
+            <meshStandardMaterial color="#cbd5e1" transparent opacity={0.55} />
           </mesh>
         );
       }
     }
+  }
   }
 
   return <group>{floorMeshes}{wallMeshes}</group>;
@@ -924,22 +1628,43 @@ const GroundGuidePath = memo(function GroundGuidePath({ guidePath, goalPosition 
    카메라
 ========================= */
 
-function FixedCamera({ fixedStartPosition, fixedLookAt, yawOffset = 0 }) {
+function FixedCamera({
+  fixedStartPosition,
+  fixedLookAt,
+  yawOffset = 0,
+  pitchOffset = 0,
+  lookOffset = [0, 0, 0],
+  zoomScale = 1,
+}) {
   useFrame(({ camera }) => {
-    camera.position.set(
-      fixedStartPosition[0],
-      fixedStartPosition[1],
-      fixedStartPosition[2]
-    );
-    const camX = fixedStartPosition[0];
-    const camZ = fixedStartPosition[2];
-    const lookDx = fixedLookAt[0] - camX;
-    const lookDz = fixedLookAt[2] - camZ;
+    // Orbit the camera around fixedLookAt using yaw/pitch offsets.
+    const baseOffset = [
+      fixedStartPosition[0] - fixedLookAt[0],
+      fixedStartPosition[1] - fixedLookAt[1],
+      fixedStartPosition[2] - fixedLookAt[2],
+    ];
+    const scaled = [baseOffset[0] * zoomScale, baseOffset[1] * zoomScale, baseOffset[2] * zoomScale];
+
+    // Yaw rotation around world Y
     const cosYaw = Math.cos(yawOffset);
     const sinYaw = Math.sin(yawOffset);
-    const rotatedDx = lookDx * cosYaw - lookDz * sinYaw;
-    const rotatedDz = lookDx * sinYaw + lookDz * cosYaw;
-    camera.lookAt(camX + rotatedDx, fixedLookAt[1], camZ + rotatedDz);
+    let ox = scaled[0] * cosYaw - scaled[2] * sinYaw;
+    let oz = scaled[0] * sinYaw + scaled[2] * cosYaw;
+    let oy = scaled[1];
+
+    // Pitch rotation around camera-local X axis (apply in XZ plane)
+    const cosPitch = Math.cos(pitchOffset);
+    const sinPitch = Math.sin(pitchOffset);
+    const py = oy * cosPitch - oz * sinPitch;
+    const pz = oy * sinPitch + oz * cosPitch;
+    oy = py;
+    oz = pz;
+
+    const lx = fixedLookAt[0] + (lookOffset?.[0] ?? 0);
+    const ly = fixedLookAt[1] + (lookOffset?.[1] ?? 0);
+    const lz = fixedLookAt[2] + (lookOffset?.[2] ?? 0);
+    camera.position.set(lx + ox, ly + oy, lz + oz);
+    camera.lookAt(lx, ly, lz);
   });
 
   return null;
@@ -1004,6 +1729,16 @@ function FollowCamera({ targetPosition, rotationY }) {
   return null;
 }
 
+function TopDownCamera({ targetPosition }) {
+  useFrame(({ camera }) => {
+    const camHeight = 15;
+    const lookHeight = 0;
+    camera.position.set(targetPosition[0], targetPosition[1] + camHeight, targetPosition[2]);
+    camera.lookAt(targetPosition[0], lookHeight, targetPosition[2]);
+  });
+  return null;
+}
+
 /* =========================
    가상 조이스틱
 ========================= */
@@ -1013,10 +1748,12 @@ function VirtualJoystick({
   accentClass = "bg-blue-500",
   onChange,
   disabled = false,
+  size = 165,
+  knobSize = 63,
+  maxDistance = 48,
+  overlay = null,
 }) {
-  const size = 165;
-  const knobSize = 63;
-  const maxDistance = 48;
+  const displayKnobSize = Math.max(18, Math.round(knobSize * 0.78));
 
   const areaRef = useRef(null);
   const activeRef = useRef(false);
@@ -1206,7 +1943,7 @@ function VirtualJoystick({
       className="bg-white/90 backdrop-blur border rounded-2xl p-2 shadow-md select-none touch-none"
       style={{ touchAction: "none", WebkitUserSelect: "none", userSelect: "none" }}
     >
-      <div className="text-[10px] font-bold text-center mb-1">{label}</div>
+      {label ? <div className="text-[10px] font-bold text-center mb-1">{label}</div> : null}
 
       <div
         ref={areaRef}
@@ -1227,18 +1964,19 @@ function VirtualJoystick({
         onContextMenu={(e) => e.preventDefault()}
         onDragStart={(e) => e.preventDefault()}
       >
-        <div className="absolute inset-0 flex items-center justify-center">
+        <div className="absolute inset-0 flex items-center justify-center z-0 pointer-events-none">
           <div className="w-[2px] h-full bg-gray-300" />
           <div className="absolute w-full h-[2px] bg-gray-300" />
         </div>
+        {overlay ? <div className="absolute inset-0 z-10 pointer-events-none">{overlay}</div> : null}
 
         <div
-          className={`absolute rounded-full ${accentClass} shadow`}
+          className={`absolute rounded-full ${accentClass} shadow z-20`}
           style={{
-            width: knobSize,
-            height: knobSize,
-            left: size / 2 - knobSize / 2 + knob.x,
-            top: size / 2 - knobSize / 2 + knob.y,
+            width: displayKnobSize,
+            height: displayKnobSize,
+            left: size / 2 - displayKnobSize / 2 + knob.x,
+            top: size / 2 - displayKnobSize / 2 + knob.y,
           }}
         />
       </div>
@@ -1255,7 +1993,9 @@ function ControlDrone({
   obstaclePositions,
   obstacleSize,
   guidePath,
+  movementRect,
   stage,
+  uiStage,
   isTutorialStage,
   controlMode,
   controlRef,
@@ -1317,7 +2057,8 @@ function ControlDrone({
         const landingHoverDuration = 0.5;
         c.landingHoldElapsed = (c.landingHoldElapsed || 0) + delta;
         if (c.landingHoldElapsed < landingHoverDuration) {
-          c.velocity = [0, 0, 0];
+          // Preserve horizontal inertia during landing; only freeze vertical during hover.
+          c.velocity[1] = 0;
         } else {
           // gentle descend with inertia feel
           c.velocity[1] = Math.max(c.velocity[1] - 0.0022, -0.026);
@@ -1411,22 +2152,49 @@ function ControlDrone({
         return;
       }
 
-      const hasCrash = !isTutorialStage && obstaclePositions.some((obstacle) =>
-        checkObstacleHit(nextPosition, obstacle, Math.max(1.1, obstacleSize * 0.72))
-      );
+      const collisionSamples = getDroneCollisionSamplePoints(nextPosition, c.rotation);
 
-      // 7단계부터는 바닥 경로 가이드를 벗어나면 즉시 충돌
-      const droneRadius = 0.5;
-      const centerSafeRadius = 1.75;
-      const isInCenterSafeZone =
-        stage >= 7 && Math.hypot(nextPosition[0], nextPosition[2]) <= centerSafeRadius;
+      // 6~11단계: 장애물 충돌 판정을 약간 더 타이트하게(덜 후하게) 조정
+      const obstacleHitRadius =
+        uiStage >= 6 && uiStage <= 11
+          ? Math.max(0.85, obstacleSize * 0.55)
+          : Math.max(1.0, obstacleSize * 0.7);
+      const hasCrash =
+        !isTutorialStage &&
+        obstaclePositions.some((obstacle) =>
+          collisionSamples.some((sample) =>
+            checkObstacleHit(sample, obstacle, obstacleHitRadius)
+          )
+        );
+
+      // UI 9~11단계(gameplay stage 4~6): restrict movement to a simple rectangle region.
+      const isOffMovementRect =
+        !isTutorialStage &&
+        stage >= 4 &&
+        stage <= 6 &&
+        movementRect &&
+        collisionSamples.some(
+          (sample) =>
+            sample[0] < movementRect.minX ||
+            sample[0] > movementRect.maxX ||
+            sample[2] < movementRect.minZ ||
+            sample[2] > movementRect.maxZ
+        );
+
+      if (isOffMovementRect) {
+        if (onWallCrash) onWallCrash();
+        else onCrashReset();
+        return;
+      }
+
+      // 7단계부터는 "실제 바닥 생성 규칙과 동일한 영역" 기준으로 충돌 판정.
       const isOffGuidePath =
         !isTutorialStage &&
         stage >= 7 &&
         guidePath &&
-        !isInCenterSafeZone &&
-        distanceToPolylineXZ(nextPosition, guidePath.points) >
-          Math.max(0.05, guidePath.width * 0.5 - droneRadius);
+        collisionSamples.some(
+          (sample) => !isInsideGuideFloorXZ(sample, guidePath, goalPosition, stage)
+        );
 
       if (isOffGuidePath) {
         if (onWallCrash) onWallCrash();
@@ -1456,8 +2224,10 @@ function ControlDrone({
 
     droneRef.current.position.set(c.position[0], c.position[1], c.position[2]);
     // Apply visible body tilt while moving with right pad.
-    const targetPitch = clamp(c.rightStick.y, -1, 1) * 0.55;
-    const targetRoll = clamp(c.rightStick.x, -1, 1) * -0.45;
+    const keyboardPitch = (c.keys.forward ? -1 : 0) + (c.keys.backward ? 1 : 0);
+    const keyboardRoll = (c.keys.left ? -1 : 0) + (c.keys.right ? 1 : 0);
+    const targetPitch = clamp(c.rightStick.y + keyboardPitch, -1, 1) * 0.275;
+    const targetRoll = clamp(c.rightStick.x + keyboardRoll, -1, 1) * -0.225;
     const currentPitch = droneRef.current.rotation.x;
     const currentRoll = droneRef.current.rotation.z;
     const nextPitch = currentPitch + (targetPitch - currentPitch) * 0.2;
@@ -1467,8 +2237,8 @@ function ControlDrone({
     const bodyScale = getShadowScale(c.position[1], 1.0, 0.55);
     const noseScale = getShadowScale(c.position[1], 0.95, 0.5);
 
-    // 이륙 전/착륙 상태에서는 그림자를 숨겨 떠 있는 느낌을 줄인다.
-    shadowGroupRef.current.visible = c.isFlying;
+    // 그림자는 항상 보이게 해서 "바닥에 붙음/떠있음"을 쉽게 구분
+    shadowGroupRef.current.visible = true;
     shadowGroupRef.current.position.set(c.position[0], 0.05, c.position[2]);
     shadowGroupRef.current.rotation.set(-Math.PI / 2, 0, c.rotation);
 
@@ -1482,12 +2252,12 @@ function ControlDrone({
       <group ref={shadowGroupRef}>
         <mesh ref={shadowBodyRef}>
           <planeGeometry args={[1, 1]} />
-          <meshBasicMaterial color="black" transparent opacity={0.18} />
+          <meshBasicMaterial color="black" transparent opacity={0.26} depthWrite={false} />
         </mesh>
 
         <mesh ref={shadowNoseRef}>
           <planeGeometry args={[1, 1]} />
-          <meshBasicMaterial color="black" transparent opacity={0.18} />
+          <meshBasicMaterial color="black" transparent opacity={0.26} depthWrite={false} />
         </mesh>
       </group>
 
@@ -1503,6 +2273,9 @@ function ControlScene({
   obstaclePositions,
   obstacleSize,
   guidePath,
+  gridMeta,
+  gridPathCells,
+  movementRect,
   stage,
   uiStage,
   isTutorialStage,
@@ -1519,6 +2292,9 @@ function ControlScene({
   fixedStartPosition,
   fixedLookAt,
   fixedYawOffset,
+  fixedPitchOffset,
+  fixedZoomScale,
+  fixedLookOffset,
 }) {
   return (
     <div className="relative flex-1 min-h-[320px] bg-gray-200 overflow-hidden">
@@ -1529,8 +2305,18 @@ function ControlScene({
       >
         <ambientLight intensity={0.75} />
         <directionalLight position={[5, 10, 5]} intensity={1} />
+        <ControlYellowFloor uiStage={uiStage} />
+        {!isTutorialStage && uiStage >= 9 && uiStage <= 11 && (
+          <MovementRectFloor movementRect={movementRect} />
+        )}
         {!isTutorialStage && (
-          <GroundGuidePath guidePath={guidePath} goalPosition={goalPosition} stage={stage} />
+          <GroundGuidePath
+            guidePath={guidePath}
+            goalPosition={goalPosition}
+            stage={uiStage}
+            gridMeta={gridMeta}
+            gridPathCells={gridPathCells}
+          />
         )}
         {!isTutorialStage && <Goal position={goalPosition} stage={stage} uiStage={uiStage} />}
         {!isTutorialStage &&
@@ -1542,7 +2328,9 @@ function ControlScene({
           obstaclePositions={obstaclePositions}
           obstacleSize={obstacleSize}
           guidePath={guidePath}
+          movementRect={movementRect}
           stage={stage}
+          uiStage={uiStage}
           isTutorialStage={isTutorialStage}
           controlMode={controlMode}
           controlRef={controlRef}
@@ -1558,7 +2346,12 @@ function ControlScene({
             fixedStartPosition={fixedStartPosition}
             fixedLookAt={fixedLookAt}
             yawOffset={fixedYawOffset}
+            pitchOffset={fixedPitchOffset}
+            zoomScale={fixedZoomScale}
+            lookOffset={fixedLookOffset}
           />
+        ) : cameraMode === "top" ? (
+          <TopDownCamera targetPosition={status.position} />
         ) : (
           <FollowCamera
             targetPosition={status.position}
@@ -1574,31 +2367,35 @@ function ControlScene({
    코딩 모드용 Scene
 ========================= */
 
-function CodingDrone({ position, rotationY }) {
+function CodingDrone({ position, rotationY, spinActive }) {
   return (
     <group>
       <DroneShadow position={position} rotationY={rotationY} />
       <group position={position} rotation={[0, rotationY, 0]}>
-        <DroneVisual spinActive spinSpeed={28} />
+        <DroneVisual spinActive={spinActive} spinSpeed={28} />
       </group>
     </group>
   );
 }
 
-function CodingCamera({ targetPosition, rotationY }) {
+function CodingCamera({ targetPosition, rotationY, zoomScale, lookOffset }) {
   useFrame(({ camera }) => {
-    const distance = 8;
-    const height = 4;
-
+    // Top-down edit camera with pinch-zoom and two-finger pan support.
+    const baseHeight = 7.1;
+    const baseBackOffset = 4.2;
+    const safeZoom = Math.max(0.6, Math.min(1.9, zoomScale ?? 1));
+    const height = baseHeight * safeZoom;
+    const backOffset = baseBackOffset * safeZoom;
+    const targetX = targetPosition[0] + (lookOffset?.[0] ?? 0);
+    const targetZ = targetPosition[2] + (lookOffset?.[2] ?? 0);
     const forwardX = -Math.sin(rotationY);
     const forwardZ = -Math.cos(rotationY);
-
     camera.position.set(
-      targetPosition[0] - forwardX * distance,
+      targetX - forwardX * backOffset,
       targetPosition[1] + height,
-      targetPosition[2] - forwardZ * distance
+      targetZ - forwardZ * backOffset
     );
-    camera.lookAt(targetPosition[0], targetPosition[1] + 0.5, targetPosition[2]);
+    camera.lookAt(targetX, targetPosition[1] + 0.9, targetZ);
   });
 
   return null;
@@ -1609,20 +2406,226 @@ function CodingScene({
   rotationY,
   goalPosition,
   obstaclePosition,
+  placedItems,
+  placementType,
+  obstacleColor,
+  obstacleEdgeColor,
+  hoverCell,
+  onHoverCell,
+  onPlaceAtCell,
+  isRunning,
+  cameraResetToken,
+  isCrash,
 }) {
+  const gridCellSize = 1;
+  const gridHalfSize = 7;
+  const visualPlaneSize = 40;
+  const [cameraZoomScale, setCameraZoomScale] = useState(1);
+  const [cameraLookOffset, setCameraLookOffset] = useState([0, 0, 0]);
+  const pinchActiveRef = useRef(false);
+  const pinchLastDistRef = useRef(0);
+  const pinchLastMidRef = useRef({ x: 0, y: 0 });
+  const getTouchDistance = (t1, t2) => {
+    const dx = t1.clientX - t2.clientX;
+    const dy = t1.clientY - t2.clientY;
+    return Math.hypot(dx, dy);
+  };
+  const getTouchMidpoint = (t1, t2) => ({
+    x: (t1.clientX + t2.clientX) * 0.5,
+    y: (t1.clientY + t2.clientY) * 0.5,
+  });
+  const snapToCell = (point) => {
+    // Snap to cell index (not line intersection) so objects sit inside each square.
+    const cx = Math.max(
+      -gridHalfSize,
+      Math.min(gridHalfSize - 1, Math.floor(point.x / gridCellSize))
+    );
+    const cz = Math.max(
+      -gridHalfSize,
+      Math.min(gridHalfSize - 1, Math.floor(point.z / gridCellSize))
+    );
+    return { x: cx, z: cz };
+  };
+
+  useEffect(() => {
+    setCameraZoomScale(1);
+    setCameraLookOffset([0, 0, 0]);
+  }, [cameraResetToken]);
+
   return (
-    <div className="relative flex-1 min-h-[320px] overflow-hidden">
+    <div
+      className="relative w-full h-full min-h-[320px] overflow-hidden"
+      style={{ touchAction: "none", overscrollBehavior: "none" }}
+      onTouchStart={(e) => {
+        if (e.touches.length >= 2) {
+          const t1 = e.touches[0];
+          const t2 = e.touches[1];
+          pinchActiveRef.current = true;
+          pinchLastDistRef.current = getTouchDistance(t1, t2);
+          pinchLastMidRef.current = getTouchMidpoint(t1, t2);
+        }
+      }}
+      onTouchMove={(e) => {
+        if (!pinchActiveRef.current || e.touches.length < 2) return;
+        e.preventDefault();
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        const dist = getTouchDistance(t1, t2);
+        const mid = getTouchMidpoint(t1, t2);
+        const lastDist = pinchLastDistRef.current || dist;
+        const lastMid = pinchLastMidRef.current || mid;
+
+        // Pinch: distance up -> zoom in (closer), distance down -> zoom out.
+        const zoomFactor = lastDist / Math.max(1, dist);
+        setCameraZoomScale((prev) => Math.max(0.65, Math.min(1.9, prev * zoomFactor)));
+
+        // Two-finger drag: pan camera target on XZ plane.
+        const dx = mid.x - lastMid.x;
+        const dy = mid.y - lastMid.y;
+        const panSpeed = 0.018;
+        setCameraLookOffset((prev) => [
+          Math.max(-12, Math.min(12, prev[0] - dx * panSpeed)),
+          0,
+          Math.max(-12, Math.min(12, prev[2] + dy * panSpeed)),
+        ]);
+
+        pinchLastDistRef.current = dist;
+        pinchLastMidRef.current = mid;
+      }}
+      onTouchEnd={(e) => {
+        if (e.touches.length < 2) pinchActiveRef.current = false;
+      }}
+      onTouchCancel={() => {
+        pinchActiveRef.current = false;
+      }}
+    >
       <Canvas
         className="w-full h-full"
-        camera={{ position: [0, 5, 8], fov: 60 }}
+        camera={{ position: [0, 6.9, 4.8], fov: 50 }}
         dpr={[1, 1.5]}
       >
         <ambientLight intensity={0.75} />
         <directionalLight position={[5, 10, 5]} intensity={1} />
-        <Goal position={goalPosition} />
-        <Obstacle position={obstaclePosition} />
-        <CodingDrone position={dronePosition} rotationY={rotationY} />
-        <CodingCamera targetPosition={dronePosition} rotationY={rotationY} />
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]}>
+          <planeGeometry args={[visualPlaneSize, visualPlaneSize]} />
+          <meshStandardMaterial color="#f8fafc" />
+        </mesh>
+        <gridHelper
+          args={[visualPlaneSize, visualPlaneSize, "#334155", "#94a3b8"]}
+          position={[0, 0.03, 0]}
+        />
+
+        <mesh
+          rotation={[-Math.PI / 2, 0, 0]}
+          position={[0, 0.02, 0]}
+          onPointerMove={(e) => {
+            if (!placementType) return;
+            const cell = snapToCell(e.point);
+            onHoverCell?.(cell);
+          }}
+          onPointerLeave={() => {
+            if (!placementType) return;
+            onHoverCell?.(null);
+          }}
+          onPointerDown={(e) => {
+            if (!placementType) return;
+            const cell = snapToCell(e.point);
+            onPlaceAtCell?.(cell);
+          }}
+        >
+          <planeGeometry args={[gridHalfSize * 2 + 2, gridHalfSize * 2 + 2]} />
+          <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+        </mesh>
+
+        {(placedItems?.goal || goalPosition) && (
+          <mesh
+            position={[
+              ((placedItems?.goal?.x ?? goalPosition?.[0] ?? 0) + 0.5) * gridCellSize,
+              0.03,
+              ((placedItems?.goal?.z ?? goalPosition?.[2] ?? 0) + 0.5) * gridCellSize,
+            ]}
+            rotation={[-Math.PI / 2, 0, 0]}
+          >
+            <planeGeometry args={[1, 1]} />
+            <meshStandardMaterial color="#15803d" transparent opacity={0.98} />
+          </mesh>
+        )}
+
+        {(placedItems?.obstacles ?? []).map((o) => (
+          <group
+            key={o.id}
+            position={[
+              (o.x + 0.5) * gridCellSize,
+              0.5 + (o.level ?? 0) * gridCellSize,
+              (o.z + 0.5) * gridCellSize,
+            ]}
+          >
+            <mesh>
+              <boxGeometry args={[1, 1, 1]} />
+              <meshStandardMaterial
+                color={o.color ?? "#a78bfa"}
+                transparent
+                opacity={0.55}
+                depthWrite={false}
+              />
+            </mesh>
+            <mesh>
+              <boxGeometry args={[1.005, 1.005, 1.005]} />
+              <meshBasicMaterial color={o.edgeColor ?? obstacleEdgeColor ?? "#7c3aed"} wireframe />
+            </mesh>
+          </group>
+        ))}
+
+        {placementType && hoverCell && (
+          placementType === "goal" ? (
+            <mesh
+              position={[(hoverCell.x + 0.5) * gridCellSize, 0.035, (hoverCell.z + 0.5) * gridCellSize]}
+              rotation={[-Math.PI / 2, 0, 0]}
+            >
+              <planeGeometry args={[1, 1]} />
+              <meshStandardMaterial color="#22c55e" transparent opacity={0.45} />
+            </mesh>
+          ) : placementType === "delete" ? (
+            <mesh
+              position={[(hoverCell.x + 0.5) * gridCellSize, 0.04, (hoverCell.z + 0.5) * gridCellSize]}
+              rotation={[-Math.PI / 2, 0, 0]}
+            >
+              <planeGeometry args={[1, 1]} />
+              <meshStandardMaterial color="#ef4444" transparent opacity={0.35} />
+            </mesh>
+          ) : (
+            <group position={[(hoverCell.x + 0.5) * gridCellSize, 0.5, (hoverCell.z + 0.5) * gridCellSize]}>
+              <mesh>
+                <boxGeometry args={[1, 1, 1]} />
+                <meshStandardMaterial
+                  color={obstacleColor ?? "#a78bfa"}
+                  transparent
+                  opacity={0.35}
+                  depthWrite={false}
+                />
+              </mesh>
+              <mesh>
+                <boxGeometry args={[1.005, 1.005, 1.005]} />
+                <meshBasicMaterial color={obstacleEdgeColor ?? "#7c3aed"} wireframe />
+              </mesh>
+            </group>
+          )
+        )}
+
+        <CodingDrone position={dronePosition} rotationY={rotationY} spinActive={isRunning} />
+        {isCrash && (
+          <Html position={[dronePosition[0], dronePosition[1] + 1.8, dronePosition[2]]} center>
+            <div className="px-3 py-1.5 rounded-lg bg-red-600/95 text-white text-sm font-bold shadow-lg whitespace-nowrap">
+              충돌했습니다
+            </div>
+          </Html>
+        )}
+        <CodingCamera
+          targetPosition={dronePosition}
+          rotationY={rotationY}
+          zoomScale={cameraZoomScale}
+          lookOffset={cameraLookOffset}
+        />
       </Canvas>
     </div>
   );
@@ -1652,6 +2655,8 @@ function ControlMode() {
       obstaclePositions: [],
       obstacleSize: 1.5,
       guidePath: null,
+      gridMeta: null,
+      gridPathCells: null,
     }),
     []
   );
@@ -1684,6 +2689,10 @@ function ControlMode() {
   const isCameraDraggingRef = useRef(false);
   const cameraDragPointerIdRef = useRef(null);
   const lastCameraDragXRef = useRef(0);
+  const lastCameraDragYRef = useRef(0);
+  const pinchActiveRef = useRef(false);
+  const pinchLastDistRef = useRef(0);
+  const pinchLastMidRef = useRef({ x: 0, y: 0 });
 
   const fixedStartPosition = useMemo(() => [0, 3.2, 6], []);
   const fixedLookAt = useMemo(() => [0, 1.0, -1.2], []);
@@ -1692,6 +2701,17 @@ function ControlMode() {
   const [cameraMode, setCameraMode] = useState("fixed");
   const [showGuide, setShowGuide] = useState(false);
   const [fixedYawOffset, setFixedYawOffset] = useState(0);
+  const [fixedPitchOffset, setFixedPitchOffset] = useState(-0.12);
+  const [fixedZoomScale, setFixedZoomScale] = useState(1);
+  const [fixedLookOffset, setFixedLookOffset] = useState([0, 0, 0]);
+  const [isSmallScreen, setIsSmallScreen] = useState(false);
+  const [isPortrait, setIsPortrait] = useState(false);
+  const [showStageJump, setShowStageJump] = useState(true);
+  const [showLeftMenu, setShowLeftMenu] = useState(true);
+  const [showMission, setShowMission] = useState(true);
+  const [showActionButtons, setShowActionButtons] = useState(true);
+  const missionTimerRef = useRef(null);
+  const tutorialAdvanceTimerRef = useRef(null);
   const [status, setStatus] = useState({
     position: START_POSITION,
     rotation: START_ROTATION,
@@ -1744,10 +2764,30 @@ function ControlMode() {
     isTutorialStage && tutorialStep < tutorialMessages.length
       ? tutorialMessages[tutorialStep]
       : "";
+
+  const triggerMissionDelay = useCallback((ms = 1400) => {
+    // Keep the stage title visible; only delay mission instructions + action buttons.
+    setShowMission(false);
+    setShowActionButtons(false);
+    if (missionTimerRef.current) clearTimeout(missionTimerRef.current);
+    missionTimerRef.current = setTimeout(() => {
+      setShowMission(true);
+      setShowActionButtons(true);
+      missionTimerRef.current = null;
+    }, ms);
+  }, []);
+
+  const resetToFixedCameraView = useCallback(() => {
+    setCameraMode("fixed");
+    setFixedYawOffset(0);
+    setFixedPitchOffset(-0.12);
+    setFixedZoomScale(1);
+    setFixedLookOffset([0, 0, 0]);
+  }, []);
   const stageTitle = useMemo(() => {
     if (stage === 1) return "1단계 : 이륙 / 착륙";
-    if (stage === 2) return "2단계 : 왼쪽 조이스틱";
-    if (stage === 3) return "3단계 : 오른쪽 조이스틱";
+    if (stage === 2) return "2단계 : 왼쪽 조이스틱 (상승/하강, 회전)";
+    if (stage === 3) return "3단계 : 오른쪽 조이스틱( 앞뒤/좌우)";
     if (stage === 4) return "4단계 : 회전 조작";
     if (stage === 5) return "5단계 : 자유 비행";
     if (stage >= 6 && stage <= 11) return `${stage}단계 : 장애물 피해 목표 도달하기`;
@@ -2076,13 +3116,17 @@ function ControlMode() {
       setElapsedSeconds(0);
       setIsStopwatchRunning(true);
     }
-    if (stage === 1 && tutorialStep === 0) setTutorialStep(1);
-    if (stage === 2 && tutorialStep === 0) setTutorialStep(1);
-    if (stage === 3 && tutorialStep === 0) setTutorialStep(1);
-    if (stage === 4 && tutorialStep === 0) setTutorialStep(1);
-    if (stage === 5 && tutorialStep === 0) setTutorialStep(1);
+    // 1~5단계: 이륙 후 1.5초 뒤 다음 미션/지시가 뜨게 함
+    if (stage >= 1 && stage <= 5 && tutorialStep === 0) {
+      triggerMissionDelay(1500);
+      if (tutorialAdvanceTimerRef.current) clearTimeout(tutorialAdvanceTimerRef.current);
+      tutorialAdvanceTimerRef.current = setTimeout(() => {
+        setTutorialStep(1);
+        tutorialAdvanceTimerRef.current = null;
+      }, 1500);
+    }
     syncStatus();
-  }, [GROUNDED_HEIGHT, playTakeoffBeepThenRotor, stage, syncStatus, tutorialStep]);
+  }, [GROUNDED_HEIGHT, playTakeoffBeepThenRotor, stage, syncStatus, triggerMissionDelay, tutorialStep]);
 
   const land = useCallback(() => {
     const c = controlRef.current;
@@ -2106,7 +3150,8 @@ function ControlMode() {
     c.landingHoldElapsed = 0;
     c.isGroundRotorSpin = false;
     c.groundRotorElapsed = 0;
-    c.velocity = [0, 0, 0];
+    // Keep horizontal inertia; only stop vertical climb immediately.
+    c.velocity[1] = Math.min(0, c.velocity[1] ?? 0);
     syncStatus();
   }, [
     GROUNDED_HEIGHT,
@@ -2339,6 +3384,8 @@ function ControlMode() {
       if (stage < MAX_STAGE) {
         const nextStage = stage + 1;
         const nextLayout = getLayoutForStage(nextStage);
+        triggerMissionDelay(1400);
+        resetToFixedCameraView();
         setStage(nextStage);
         setStageLayout(nextLayout);
         resetStageOnly(nextLayout, nextStage);
@@ -2356,6 +3403,8 @@ function ControlMode() {
     stage,
     stopRotorSound,
     syncStatus,
+    triggerMissionDelay,
+    resetToFixedCameraView,
   ]);
 
   useEffect(() => {
@@ -2464,15 +3513,32 @@ function ControlMode() {
       );
     }
 
+    const isTouchUiTarget = (touch) => {
+      try {
+        if (!touch) return false;
+        if (typeof document === "undefined" || typeof document.elementFromPoint !== "function") return false;
+        const el = document.elementFromPoint(touch.clientX, touch.clientY);
+        return isUiTarget(el);
+      } catch {
+        return false;
+      }
+    };
+
+    const dist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    const mid = (a, b) => ({ x: (a.clientX + b.clientX) * 0.5, y: (a.clientY + b.clientY) * 0.5 });
+
     function handleWindowPointerDown(e) {
       if (isUiTarget(e.target)) return;
+      if (pinchActiveRef.current) return;
       isCameraDraggingRef.current = true;
       cameraDragPointerIdRef.current = e.pointerId;
       lastCameraDragXRef.current = e.clientX;
+      lastCameraDragYRef.current = e.clientY;
     }
 
     function handleWindowPointerMove(e) {
       if (!isCameraDraggingRef.current) return;
+      if (pinchActiveRef.current) return;
       if (
         cameraDragPointerIdRef.current !== null &&
         e.pointerId !== cameraDragPointerIdRef.current
@@ -2481,7 +3547,10 @@ function ControlMode() {
       }
       const deltaX = e.clientX - lastCameraDragXRef.current;
       lastCameraDragXRef.current = e.clientX;
+      const deltaY = e.clientY - lastCameraDragYRef.current;
+      lastCameraDragYRef.current = e.clientY;
       setFixedYawOffset((prev) => prev - deltaX * 0.006);
+      setFixedPitchOffset((prev) => clamp(prev - deltaY * 0.004, -0.85, 0.35));
     }
 
     function stopCameraDrag(e) {
@@ -2495,6 +3564,65 @@ function ControlMode() {
       cameraDragPointerIdRef.current = null;
     }
 
+    function handleWindowTouchStart(e) {
+      if (!e.touches || e.touches.length < 2) return;
+      const t0 = e.touches[0];
+      const t1 = e.touches[1];
+      if (!t0 || !t1) return;
+      if (isTouchUiTarget(t0) || isTouchUiTarget(t1)) return;
+      pinchActiveRef.current = true;
+      pinchLastDistRef.current = dist(t0, t1);
+      pinchLastMidRef.current = mid(t0, t1);
+      // Stop single-finger camera drag while pinching
+      isCameraDraggingRef.current = false;
+      cameraDragPointerIdRef.current = null;
+      e.preventDefault();
+    }
+
+    function handleWindowTouchMove(e) {
+      if (!pinchActiveRef.current) return;
+      if (!e.touches || e.touches.length < 2) {
+        pinchActiveRef.current = false;
+        return;
+      }
+      const t0 = e.touches[0];
+      const t1 = e.touches[1];
+      if (!t0 || !t1) return;
+      if (isTouchUiTarget(t0) || isTouchUiTarget(t1)) return;
+
+      const dNow = dist(t0, t1);
+      const mNow = mid(t0, t1);
+      const dPrev = pinchLastDistRef.current || dNow;
+      const mPrev = pinchLastMidRef.current || mNow;
+
+      const factor = dPrev > 1e-3 ? dNow / dPrev : 1;
+      // Pinch-out (factor>1) => zoom in (closer) => smaller zoomScale
+      setFixedZoomScale((prev) => clamp(prev / factor, 0.6, 2.0));
+
+      const dx = mNow.x - mPrev.x;
+      const dy = mNow.y - mPrev.y;
+      // Two-finger pan: move look-at point in world X/Z.
+      setFixedLookOffset((prev) => {
+        const px = prev?.[0] ?? 0;
+        const py = prev?.[1] ?? 0;
+        const pz = prev?.[2] ?? 0;
+        const panScale = 0.01;
+        return [px - dx * panScale, py, pz + dy * panScale];
+      });
+
+      pinchLastDistRef.current = dNow;
+      pinchLastMidRef.current = mNow;
+      e.preventDefault();
+    }
+
+    function handleWindowTouchEndOrCancel(e) {
+      if (!pinchActiveRef.current) return;
+      if (e.touches && e.touches.length >= 2) return;
+      pinchActiveRef.current = false;
+      pinchLastDistRef.current = 0;
+      pinchLastMidRef.current = { x: 0, y: 0 };
+    }
+
     window.addEventListener("pointerdown", handleWindowPointerDown, {
       passive: true,
     });
@@ -2503,20 +3631,60 @@ function ControlMode() {
     });
     window.addEventListener("pointerup", stopCameraDrag, { passive: true });
     window.addEventListener("pointercancel", stopCameraDrag, { passive: true });
+    window.addEventListener("touchstart", handleWindowTouchStart, { passive: false });
+    window.addEventListener("touchmove", handleWindowTouchMove, { passive: false });
+    window.addEventListener("touchend", handleWindowTouchEndOrCancel, { passive: false });
+    window.addEventListener("touchcancel", handleWindowTouchEndOrCancel, { passive: false });
 
     return () => {
       window.removeEventListener("pointerdown", handleWindowPointerDown);
       window.removeEventListener("pointermove", handleWindowPointerMove);
       window.removeEventListener("pointerup", stopCameraDrag);
       window.removeEventListener("pointercancel", stopCameraDrag);
+      window.removeEventListener("touchstart", handleWindowTouchStart);
+      window.removeEventListener("touchmove", handleWindowTouchMove);
+      window.removeEventListener("touchend", handleWindowTouchEndOrCancel);
+      window.removeEventListener("touchcancel", handleWindowTouchEndOrCancel);
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    // Use the smaller viewport dimension so mobile landscape still counts as "small".
+    const apply = () => setIsSmallScreen(Math.min(window.innerWidth, window.innerHeight) <= 640);
+    apply();
+    window.addEventListener("resize", apply, { passive: true });
+    return () => window.removeEventListener("resize", apply);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const mq = window.matchMedia("(orientation: portrait)");
+    const apply = () => setIsPortrait(Boolean(mq.matches));
+    apply();
+    mq.addEventListener?.("change", apply);
+    return () => mq.removeEventListener?.("change", apply);
+  }, []);
+
+  useEffect(() => {
+    // 모바일 세로에서는 기본 접힘(겹침 방지)
+    if (isSmallScreen && isPortrait) setShowStageJump(false);
+    else setShowStageJump(true);
+  }, [isPortrait, isSmallScreen]);
+
+  useEffect(() => {
+    // 모바일 세로에서는 좌상단 메뉴도 기본 접힘(겹침 방지)
+    if (isSmallScreen && isPortrait) setShowLeftMenu(false);
+    else setShowLeftMenu(true);
+  }, [isPortrait, isSmallScreen]);
 
   useEffect(() => {
     return () => {
       if (crashTimerRef.current) clearTimeout(crashTimerRef.current);
       if (successTimerRef.current) clearTimeout(successTimerRef.current);
       if (overlayTimerRef.current) clearTimeout(overlayTimerRef.current);
+      if (missionTimerRef.current) clearTimeout(missionTimerRef.current);
+      if (tutorialAdvanceTimerRef.current) clearTimeout(tutorialAdvanceTimerRef.current);
     };
   }, []);
 
@@ -2525,119 +3693,141 @@ function ControlMode() {
       className="w-full h-full min-h-0 relative flex flex-col"
       style={{ touchAction: "none", overscrollBehavior: "none" }}
     >
-      <div
-        data-ui-block="true"
-        className="absolute left-3 top-3 z-30 w-[230px] bg-white/90 backdrop-blur border rounded-xl p-3 shadow-sm space-y-2"
-      >
-        <div className="text-xs font-semibold text-gray-700 text-center">
-          단계 {stage} / {MAX_STAGE}
-        </div>
-        {stage >= 6 && (
-          <div className="text-[11px] text-center font-semibold text-emerald-700 bg-emerald-50 rounded-md py-1">
-            초시계: {elapsedSeconds.toFixed(2)}초 {isStopwatchRunning ? "(측정중)" : ""}
-          </div>
+      <div data-ui-block="true" className="absolute left-2 sm:left-3 top-2 sm:top-3 z-[120]">
+        {(isSmallScreen && isPortrait) && (
+          <button
+            onClick={() => setShowLeftMenu((v) => !v)}
+            className="px-3 py-2 rounded-xl bg-white/90 backdrop-blur border shadow-sm text-sm font-semibold text-gray-800"
+          >
+            메뉴
+          </button>
         )}
-        <div className="flex gap-2">
-          <button
-            onClick={() => setControlMode("normal")}
-            className={`flex-1 px-2 py-1 rounded-lg font-semibold text-xs ${
-              controlMode === "normal"
-                ? "bg-blue-500 text-white"
-                : "bg-gray-200 text-gray-800"
-            }`}
-          >
-            기본조종
-          </button>
-          <button
-            onClick={() => setControlMode("headless")}
-            className={`flex-1 px-2 py-1 rounded-lg font-semibold text-xs ${
-              controlMode === "headless"
-                ? "bg-blue-500 text-white"
-                : "bg-gray-200 text-gray-800"
-            }`}
-          >
-            헤드리스조종
-          </button>
-        </div>
 
-        <div className="flex gap-2">
-          <button
-            onClick={() => setCameraMode("fixed")}
-            className={`flex-1 px-2 py-1 rounded-lg font-semibold text-xs ${
-              cameraMode === "fixed"
-                ? "bg-teal-600 text-white"
-                : "bg-gray-200 text-gray-800"
-            }`}
-          >
-            고정시점
-          </button>
-          <button
-            onClick={() => setCameraMode("drone")}
-            className={`flex-1 px-2 py-1 rounded-lg font-semibold text-xs ${
-              cameraMode === "drone"
-                ? "bg-teal-600 text-white"
-                : "bg-gray-200 text-gray-800"
-            }`}
-          >
-            드론시점
-          </button>
-        </div>
+        {(!(isSmallScreen && isPortrait) || showLeftMenu) && (
+          <div className="mt-1 w-[190px] sm:w-[230px] bg-white/90 backdrop-blur border rounded-xl p-2 sm:p-3 shadow-sm space-y-2">
+            <div className="text-[11px] sm:text-xs font-semibold text-gray-700 text-center">
+              단계 {stage} / {MAX_STAGE}
+            </div>
+            {stage >= 6 && (
+              <div className="text-[10px] sm:text-[11px] text-center font-semibold text-emerald-700 bg-emerald-50 rounded-md py-1">
+                초시계: {elapsedSeconds.toFixed(2)}초 {isStopwatchRunning ? "(측정중)" : ""}
+              </div>
+            )}
+            <div className="flex gap-2">
+              <button
+                onClick={() => setControlMode("normal")}
+                className={`flex-1 px-2 py-1 rounded-lg font-semibold text-[11px] sm:text-xs ${
+                  controlMode === "normal" ? "bg-blue-500 text-white" : "bg-gray-200 text-gray-800"
+                }`}
+              >
+                기본조종
+              </button>
+              <button
+                onClick={() => setControlMode("headless")}
+                className={`flex-1 px-2 py-1 rounded-lg font-semibold text-[11px] sm:text-xs ${
+                  controlMode === "headless" ? "bg-blue-500 text-white" : "bg-gray-200 text-gray-800"
+                }`}
+              >
+                헤드리스조종
+              </button>
+            </div>
 
-        <div className="flex gap-2">
-          <button
-            onClick={() => setShowGuide((prev) => !prev)}
-            className="w-full px-2 py-1 bg-gray-500 text-white rounded-lg text-xs"
-          >
-            키보드 조종법
-          </button>
-        </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  setCameraMode("fixed");
+                  // Reset fixed camera to initial view
+                  setFixedYawOffset(0);
+                  setFixedPitchOffset(-0.12);
+                  setFixedZoomScale(1);
+                  setFixedLookOffset([0, 0, 0]);
+                }}
+                className={`flex-1 px-2 py-1 rounded-lg font-semibold text-[11px] sm:text-xs ${
+                  cameraMode === "fixed" ? "bg-teal-600 text-white" : "bg-gray-200 text-gray-800"
+                }`}
+              >
+                고정시점
+              </button>
+              <button
+                onClick={() => setCameraMode("drone")}
+                className={`flex-1 px-2 py-1 rounded-lg font-semibold text-[11px] sm:text-xs ${
+                  cameraMode === "drone" ? "bg-teal-600 text-white" : "bg-gray-200 text-gray-800"
+                }`}
+              >
+                드론시점
+              </button>
+            </div>
 
-        {showGuide && (
-          <div className="text-[10px] leading-4 text-gray-500 bg-white/70 rounded-lg p-2">
-            왼쪽 스틱: 상승/하강 + 좌우 회전
-            <br />
-            오른쪽 스틱: 전진/후진 + 좌우 이동
-            <br />
-            키보드 조종법: WASD / IJKL, Space 이륙/착륙
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowGuide((prev) => !prev)}
+                className="w-full px-2 py-1 bg-gray-500 text-white rounded-lg text-[11px] sm:text-xs"
+              >
+                키보드 조종법
+              </button>
+            </div>
+
+            {showGuide && (
+              <div className="text-[10px] leading-4 text-gray-500 bg-white/70 rounded-lg p-2">
+                왼쪽 스틱: 상승/하강 + 좌우 회전
+                <br />
+                오른쪽 스틱: 전진/후진 + 좌우 이동
+                <br />
+                키보드 조종법: WASD / IJKL, Space 이륙/착륙
+              </div>
+            )}
           </div>
         )}
       </div>
 
       {/* TEMP DEBUG: 단계 점프 버튼 (배포 전 제거 예정) */}
-      <div
-        data-ui-block="true"
-        className="absolute right-3 top-3 z-30 bg-white/90 backdrop-blur border rounded-xl p-2 shadow-sm"
-      >
-        <div className="text-[10px] text-gray-600 text-center mb-1">
-          테스트 단계 이동
-        </div>
-        <div className="flex gap-1">
-          {Array.from({ length: MAX_STAGE }).map((_, idx) => {
-            const stageNumber = idx + 1;
-            const isActive = stage === stageNumber;
-            return (
-              <button
-                key={stageNumber}
-                onClick={() => {
-                  const nextLayout = getLayoutForStage(stageNumber);
-                  setStage(stageNumber);
-                  setTutorialStep(0);
-                  setStageLayout(nextLayout);
-                  resetStageOnly(nextLayout, stageNumber);
-                }}
-                className={`w-7 h-7 rounded-md text-xs font-semibold ${
-                  isActive
-                    ? "bg-blue-600 text-white"
-                    : completedStages.has(stageNumber)
-                      ? "bg-green-600 text-white"
-                      : "bg-gray-200 text-gray-800 hover:bg-gray-300"
-                }`}
-              >
-                {stageNumber}
-              </button>
-            );
-          })}
-        </div>
+      <div data-ui-block="true" className="absolute right-2 sm:right-3 top-2 sm:top-3 z-[80]">
+        {(isSmallScreen && isPortrait) && (
+          <button
+            onClick={() => setShowStageJump((v) => !v)}
+            className="px-3 py-2 rounded-xl bg-white/90 backdrop-blur border shadow-sm text-sm font-semibold text-gray-800"
+          >
+            단계
+          </button>
+        )}
+
+        {(!(isSmallScreen && isPortrait) || showStageJump) && (
+          <div className="mt-1 bg-white/90 backdrop-blur border rounded-xl p-2 shadow-sm max-w-[92vw]">
+            <div className="text-[10px] text-gray-600 text-center mb-1">
+              테스트 단계 이동
+            </div>
+            <div className="flex gap-1 flex-wrap justify-center">
+              {Array.from({ length: MAX_STAGE }).map((_, idx) => {
+                const stageNumber = idx + 1;
+                const isActive = stage === stageNumber;
+                return (
+                  <button
+                    key={stageNumber}
+                    onClick={() => {
+                      const nextLayout = getLayoutForStage(stageNumber);
+                      triggerMissionDelay(1000);
+                      resetToFixedCameraView();
+                      setStage(stageNumber);
+                      setTutorialStep(0);
+                      setStageLayout(nextLayout);
+                      resetStageOnly(nextLayout, stageNumber);
+                      if (isSmallScreen && isPortrait) setShowStageJump(false);
+                    }}
+                    className={`w-7 h-7 rounded-md text-xs font-semibold ${
+                      isActive
+                        ? "bg-blue-600 text-white"
+                        : completedStages.has(stageNumber)
+                          ? "bg-green-600 text-white"
+                          : "bg-gray-200 text-gray-800 hover:bg-gray-300"
+                    }`}
+                  >
+                    {stageNumber}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       {centerOverlayMessage && (
@@ -2661,6 +3851,9 @@ function ControlMode() {
         obstaclePositions={stageLayout.obstaclePositions}
         obstacleSize={stageLayout.obstacleSize}
         guidePath={stageLayout.guidePath}
+        gridMeta={stageLayout.gridMeta}
+        gridPathCells={stageLayout.gridPathCells}
+        movementRect={stageLayout.movementRect}
         stage={gameplayStage}
         uiStage={stage}
         isTutorialStage={isTutorialStage}
@@ -2677,6 +3870,9 @@ function ControlMode() {
         fixedStartPosition={fixedStartPosition}
         fixedLookAt={fixedLookAt}
         fixedYawOffset={fixedYawOffset}
+        fixedPitchOffset={fixedPitchOffset}
+        fixedZoomScale={fixedZoomScale}
+        fixedLookOffset={fixedLookOffset}
       />
 
       <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 top-[17%] z-20">
@@ -2685,7 +3881,7 @@ function ControlMode() {
         </div>
       </div>
 
-      {isTutorialStage && currentTutorialMessage && (
+      {showMission && isTutorialStage && currentTutorialMessage && (
         <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 top-[31%] z-20">
           <div className="px-4 py-2 rounded-xl bg-indigo-600/90 text-white text-sm font-semibold shadow-lg">
             {currentTutorialMessage}
@@ -2693,33 +3889,53 @@ function ControlMode() {
         </div>
       )}
 
-      <div data-ui-block="true" className="fixed left-3 bottom-[236px] z-50 flex gap-2">
-        <button
-          onClick={toggleTakeoffLand}
-          className={`px-6 py-3 rounded-lg font-semibold text-base shadow ${
-            status.isFlying
-              ? "bg-indigo-400 text-white"
-              : "bg-indigo-600 text-white"
-          }`}
+      {showActionButtons && (
+        <div
+          data-ui-block="true"
+          className="fixed left-2 sm:left-3 z-50 flex gap-2"
+          style={{
+            // Mobile landscape: keep buttons low, but above the left joystick.
+            bottom: isSmallScreen
+              ? isPortrait
+                ? 180
+                : "calc(152px + env(safe-area-inset-bottom, 0px))"
+              : 236,
+          }}
         >
-          {status.isFlying ? "착륙" : "이륙"}
-        </button>
-        <button
-          onClick={resetStageOnly}
-          className="px-6 py-3 rounded-lg font-semibold text-base shadow bg-gray-700 text-white"
-        >
-          리셋
-        </button>
-      </div>
+          <button
+            onClick={toggleTakeoffLand}
+            className="px-4 sm:px-6 py-1.5 sm:py-3 rounded-lg font-semibold text-sm sm:text-base shadow bg-indigo-600 text-white"
+          >
+            {status.isFlying ? "착륙" : "이륙"}
+          </button>
+          <button
+            onClick={resetStageOnly}
+            className="px-4 sm:px-6 py-1.5 sm:py-3 rounded-lg font-semibold text-sm sm:text-base shadow bg-gray-700 text-white"
+          >
+            리셋
+          </button>
+        </div>
+      )}
 
       <div
         data-ui-block="true"
         className="fixed left-3 bottom-3 z-50 touch-none"
       >
         <VirtualJoystick
-          label="회전 / 고도"
+          label=""
           accentClass="bg-purple-500"
           disabled={!status.isFlying}
+          size={isSmallScreen ? 120 : 165}
+          knobSize={isSmallScreen ? 46 : 63}
+          maxDistance={isSmallScreen ? 34 : 48}
+          overlay={
+            <div className="pointer-events-none absolute inset-0 text-[11px] font-bold text-gray-600">
+              <div className="absolute left-1/2 top-1 -translate-x-1/2">상승</div>
+              <div className="absolute left-1/2 bottom-1 -translate-x-1/2">하강</div>
+              <div className="absolute left-1 top-1/2 -translate-y-1/2">↺</div>
+              <div className="absolute right-1 top-1/2 -translate-y-1/2">↻</div>
+            </div>
+          }
           onChange={(value) => {
             controlRef.current.leftStick = {
               x: -value.x,
@@ -2734,9 +3950,20 @@ function ControlMode() {
         className="fixed right-3 bottom-3 z-50 touch-none"
       >
         <VirtualJoystick
-          label="이동"
+          label=""
           accentClass="bg-blue-500"
           disabled={!status.isFlying}
+          size={isSmallScreen ? 120 : 165}
+          knobSize={isSmallScreen ? 46 : 63}
+          maxDistance={isSmallScreen ? 34 : 48}
+          overlay={
+            <div className="pointer-events-none absolute inset-0 text-[11px] font-bold text-gray-600">
+              <div className="absolute left-1/2 top-1 -translate-x-1/2">앞</div>
+              <div className="absolute left-1/2 bottom-1 -translate-x-1/2">뒤</div>
+              <div className="absolute left-1 top-1/2 -translate-y-1/2">좌</div>
+              <div className="absolute right-1 top-1/2 -translate-y-1/2">우</div>
+            </div>
+          }
           onChange={(value) => {
             controlRef.current.rightStick = {
               x: value.x,
@@ -2825,7 +4052,13 @@ export default function Home() {
   return (
     <div className="w-screen h-[100dvh] overflow-hidden relative flex flex-col bg-gray-100">
       {mode !== "home" && (
-        <div className="absolute right-3 top-20 z-40 flex gap-2 bg-white/90 backdrop-blur border rounded-xl p-2 shadow-sm">
+        <div
+          className="fixed z-[170] flex gap-2 bg-white/90 backdrop-blur border rounded-xl p-2 shadow-sm"
+          style={{
+            right: "calc(8px + env(safe-area-inset-right, 0px))",
+            top: "calc(8px + env(safe-area-inset-top, 0px))",
+          }}
+        >
           <button
             onClick={() => setMode("home")}
             className="px-3 py-1 rounded-lg font-semibold text-sm bg-gray-200 text-gray-800"
