@@ -352,7 +352,7 @@ function isInsideGuideFloorXZ(point, guidePath, goalPosition, stage) {
   const pz = point[2];
 
   // If a precomputed grid safe mask exists, always use it.
-  // (UI 12~15 uses gameplay stage 7~10 internally, so we cannot branch on `stage >= 12`.)
+  // (gameplay stage 7+ uses grid safe mask; UI 15~25 maps to gameplay 7~17.)
   const meta = guidePath?.__gridMeta;
   const mask = guidePath?.__gridSafeMask;
   if (meta && mask) {
@@ -365,10 +365,10 @@ function isInsideGuideFloorXZ(point, guidePath, goalPosition, stage) {
 
   // For stages 12~15 use tighter collision width to avoid delayed wall hit.
   const halfVisualWidth =
-    stage >= 12
-      ? Math.max(0.05, width * 0.5 - (stage <= 13 ? 0.04 : 0.1))
+    stage >= 7
+      ? Math.max(0.05, width * 0.5 - (stage <= 8 ? 0.04 : 0.1))
       : (width + 0.02) * 0.5;
-  const edgeTolerance = stage >= 12 ? 0 : 0.02;
+  const edgeTolerance = stage >= 7 ? 0 : 0.02;
 
   const inRect = (cx, cz, w, d) =>
     Math.abs(px - cx) <= w * 0.5 + edgeTolerance &&
@@ -396,7 +396,7 @@ function isInsideGuideFloorXZ(point, guidePath, goalPosition, stage) {
 
   // Start/end widened patches are used for floor visuals, but on 12~15 they make
   // wall collision too late. Keep them for lower stages only.
-  if (stage >= 12) {
+  if (stage >= 7) {
     return false;
   }
 
@@ -477,10 +477,17 @@ function buildBentGuidePath(startPosition, goal, stage) {
     8: 2.8,
     9: 2.4,
     10: 2.1,
+    11: 2.0,
+    12: 1.9,
+    13: 1.8,
+    14: 1.7,
+    15: 1.65,
+    16: 1.6,
+    17: 1.55,
   };
 
   return {
-    width: widthByStage[stage] ?? 2.1,
+    width: widthByStage[stage] ?? 1.7,
     points: knots,
   };
 }
@@ -504,11 +511,83 @@ function checkGoalHit(position, goalPosition, stage, isFlying, groundedHeight = 
   );
 }
 
+function buildGridSafeMask(guidePath, gridPathCells, meta) {
+  if (!meta || !Array.isArray(gridPathCells) || gridPathCells.length < 2) return null;
+  const { minX: gridMinX, minZ: gridMinZ, cell: gridCell, cols, rows } = meta;
+  const mask = new Uint8Array(cols * rows);
+  const rCells = Math.max(
+    1,
+    Math.ceil(((guidePath?.width ?? 2.1) * 0.5 + 0.22 * gridCell) / gridCell)
+  );
+  const idx = (x, z) => z * cols + x;
+  const stampRect = (x0, x1, z0, z1) => {
+    const xx0 = Math.max(0, Math.min(x0, x1));
+    const xx1 = Math.min(cols - 1, Math.max(x0, x1));
+    const zz0 = Math.max(0, Math.min(z0, z1));
+    const zz1 = Math.min(rows - 1, Math.max(z0, z1));
+    for (let zz = zz0; zz <= zz1; zz += 1) {
+      for (let xx = xx0; xx <= xx1; xx += 1) mask[idx(xx, zz)] = 1;
+    }
+  };
+  const stampSquare = (cx, cz) => stampRect(cx - rCells, cx + rCells, cz - rCells, cz + rCells);
+  const dirBetween = (a, b) => {
+    const dx = b.x - a.x;
+    const dz = b.z - a.z;
+    if (dx === 1 && dz === 0) return 0;
+    if (dx === -1 && dz === 0) return 1;
+    if (dx === 0 && dz === 1) return 2;
+    if (dx === 0 && dz === -1) return 3;
+    return -1;
+  };
+  const stampSegment = (a, b, dir) => {
+    if (dir === 0 || dir === 1) {
+      const x0 = Math.min(a.x, b.x);
+      const x1 = Math.max(a.x, b.x);
+      const z = a.z;
+      stampRect(x0 - rCells, x1 + rCells, z - rCells, z + rCells);
+    } else if (dir === 2 || dir === 3) {
+      const z0 = Math.min(a.z, b.z);
+      const z1 = Math.max(a.z, b.z);
+      const x = a.x;
+      stampRect(x - rCells, x + rCells, z0 - rCells, z1 + rCells);
+    }
+  };
+
+  stampSquare(gridPathCells[0].x, gridPathCells[0].z);
+  stampSquare(gridPathCells[gridPathCells.length - 1].x, gridPathCells[gridPathCells.length - 1].z);
+  for (let k = 1; k < gridPathCells.length - 1; k += 1) {
+    const d1 = dirBetween(gridPathCells[k - 1], gridPathCells[k]);
+    const d2 = dirBetween(gridPathCells[k], gridPathCells[k + 1]);
+    if (d1 >= 0 && d2 >= 0 && d1 !== d2) stampSquare(gridPathCells[k].x, gridPathCells[k].z);
+  }
+  let k = 0;
+  while (k < gridPathCells.length - 1) {
+    const d = dirBetween(gridPathCells[k], gridPathCells[k + 1]);
+    let j = k + 1;
+    while (j < gridPathCells.length - 1) {
+      const dn = dirBetween(gridPathCells[j], gridPathCells[j + 1]);
+      if (dn !== d) break;
+      j += 1;
+    }
+    if (d >= 0) stampSegment(gridPathCells[k], gridPathCells[j], d);
+    else stampSquare(gridPathCells[k].x, gridPathCells[k].z);
+    k = j;
+  }
+
+  return mask;
+}
+
 function generateStageLayout(stage, startPosition) {
   const obstacleCount = getObstacleCountByStage(stage);
   const obstacleSize = getObstacleSizeByStage(stage);
+  const obstacleAreaExtraByStage = {
+    4: 0.45, // UI 9단계
+    6: 0.65, // UI 11단계
+  };
+  const obstacleAreaExtra = obstacleAreaExtraByStage[stage] ?? 0;
+  const effectiveObstacleSize = obstacleSize + obstacleAreaExtra;
   const goalRadius = getStageGoalRadius(stage);
-  const goalObstacleClearance = goalRadius + obstacleSize * 0.9 + 0.8;
+  const goalObstacleClearance = goalRadius + effectiveObstacleSize * 0.9 + 0.8;
   const goalY = stage >= 7 ? 0 : 0.5;
   let goal = [6, goalY, -6];
 
@@ -538,12 +617,32 @@ function generateStageLayout(stage, startPosition) {
           };
 
   if (stage >= 7) {
-    // 12~15단계(게임플레이 7~10):
+    // 15~25단계(게임플레이 7~17):
     // - 시작 후 곧바로 벽에 붙지 않도록 첫 직선 구간을 충분히 확보
     // - 코너 직후 즉시 착륙하지 않도록 마지막 직선 구간 길이도 확보
     const snap = 0.2;
-    const minFirstLegLength = stage >= 9 ? 3.2 : 2.6;
-    const minFinalLegLength = stage >= 9 ? 2.7 : 2.2;
+    const minFirstLegLengthByStage = {
+      11: 3.7,
+      12: 4.0,
+      13: 4.4,
+      14: 4.8,
+      15: 4.6,
+      16: 4.7,
+      17: 4.9,
+    };
+    const minFinalLegLengthByStage = {
+      11: 3.2,
+      12: 3.5,
+      13: 3.9,
+      14: 4.2,
+      15: 4.0,
+      16: 4.1,
+      17: 4.3,
+    };
+    const minFirstLegLength =
+      minFirstLegLengthByStage[stage] ?? (stage >= 9 ? 3.2 : 2.6);
+    const minFinalLegLength =
+      minFinalLegLengthByStage[stage] ?? (stage >= 9 ? 2.7 : 2.2);
     let guidePath = null;
     let goalTry = 0;
 
@@ -650,7 +749,7 @@ function generateStageLayout(stage, startPosition) {
       const cols = Math.max(1, Math.ceil((gridMaxX - gridMinX) / gridCell));
       const rows = Math.max(1, Math.ceil((gridMaxZ - gridMinZ) / gridCell));
 
-      // internal stage: 7~8 => UI 12~13 (1 bend), 9~10 => UI 14~15 (2 bends)
+      // internal stage: 7~8 => UI 15~16 (1 bend), 9+ => UI 17+ (2 bends)
       const desiredBends = stage >= 9 ? 2 : 1;
       const gridPathCells = computeGridPathCells4DirTurnAStar({
         gridMinX,
@@ -661,7 +760,7 @@ function generateStageLayout(stage, startPosition) {
         startWorld: startPosition,
         goalWorld: landingGoal,
         desiredBends,
-        allowFewerBends: stage < 9, // 14~15는 반드시 2번 꺾임 유지
+        allowFewerBends: stage < 9, // 17단계(UI)부터는 반드시 2번 꺾임 유지
         blockedMask: null,
       });
 
@@ -669,9 +768,19 @@ function generateStageLayout(stage, startPosition) {
       const analysis = analyzeGridPath(gridPathCells);
       if (analysis.bends !== desiredBends) continue;
 
-      // Prevent "almost straight" trivialization on 15: enforce minimum straight segment lengths.
+      // 단계가 올라갈수록 코너 전/후 직선 구간을 길게 강제해 난이도 상승.
       if (desiredBends === 2) {
-        const minSegCells = stage >= 10 ? 10 : 8; // 15단계(10) 더 엄격
+        const minSegCellsByStage = {
+          10: 10,
+          11: 12,
+          12: 13,
+          13: 14,
+          14: 15,
+          15: 14,
+          16: 14,
+          17: 15,
+        };
+        const minSegCells = minSegCellsByStage[stage] ?? (stage >= 10 ? 10 : 8);
         if (analysis.segLens.some((len) => len < minSegCells)) continue;
       }
 
@@ -681,70 +790,11 @@ function generateStageLayout(stage, startPosition) {
       guidePath.__gridMeta = { minX: gridMinX, minZ: gridMinZ, cell: gridCell, cols, rows };
       guidePath.__gridPathCells = gridPathCells;
 
-      // Precompute dilated safe mask once (used for both rendering and wall collision).
-      {
-        const mask = new Uint8Array(cols * rows);
-        const rCells = Math.max(1, Math.ceil(((guidePath.width ?? 2.1) * 0.5 + 0.22 * gridCell) / gridCell));
-        const idx = (x, z) => z * cols + x;
-        const stampRect = (x0, x1, z0, z1) => {
-          const xx0 = Math.max(0, Math.min(x0, x1));
-          const xx1 = Math.min(cols - 1, Math.max(x0, x1));
-          const zz0 = Math.max(0, Math.min(z0, z1));
-          const zz1 = Math.min(rows - 1, Math.max(z0, z1));
-          for (let zz = zz0; zz <= zz1; zz += 1) {
-            for (let xx = xx0; xx <= xx1; xx += 1) mask[idx(xx, zz)] = 1;
-          }
-        };
-        const stampSquare = (cx, cz) => stampRect(cx - rCells, cx + rCells, cz - rCells, cz + rCells);
-        const dirBetween = (a, b) => {
-          const dx = b.x - a.x;
-          const dz = b.z - a.z;
-          if (dx === 1 && dz === 0) return 0;
-          if (dx === -1 && dz === 0) return 1;
-          if (dx === 0 && dz === 1) return 2;
-          if (dx === 0 && dz === -1) return 3;
-          return -1;
-        };
-        const stampSegment = (a, b, dir) => {
-          if (dir === 0 || dir === 1) {
-            const x0 = Math.min(a.x, b.x);
-            const x1 = Math.max(a.x, b.x);
-            const z = a.z;
-            stampRect(x0 - rCells, x1 + rCells, z - rCells, z + rCells);
-          } else if (dir === 2 || dir === 3) {
-            const z0 = Math.min(a.z, b.z);
-            const z1 = Math.max(a.z, b.z);
-            const x = a.x;
-            stampRect(x - rCells, x + rCells, z0 - rCells, z1 + rCells);
-          }
-        };
-
-        // caps
-        stampSquare(gridPathCells[0].x, gridPathCells[0].z);
-        stampSquare(gridPathCells[gridPathCells.length - 1].x, gridPathCells[gridPathCells.length - 1].z);
-        // bends
-        for (let k = 1; k < gridPathCells.length - 1; k += 1) {
-          const d1 = dirBetween(gridPathCells[k - 1], gridPathCells[k]);
-          const d2 = dirBetween(gridPathCells[k], gridPathCells[k + 1]);
-          if (d1 >= 0 && d2 >= 0 && d1 !== d2) stampSquare(gridPathCells[k].x, gridPathCells[k].z);
-        }
-        // compressed segments
-        let k = 0;
-        while (k < gridPathCells.length - 1) {
-          const d = dirBetween(gridPathCells[k], gridPathCells[k + 1]);
-          let j = k + 1;
-          while (j < gridPathCells.length - 1) {
-            const dn = dirBetween(gridPathCells[j], gridPathCells[j + 1]);
-            if (dn !== d) break;
-            j += 1;
-          }
-          if (d >= 0) stampSegment(gridPathCells[k], gridPathCells[j], d);
-          else stampSquare(gridPathCells[k].x, gridPathCells[k].z);
-          k = j;
-        }
-
-        guidePath.__gridSafeMask = mask;
-      }
+      guidePath.__gridSafeMask = buildGridSafeMask(
+        guidePath,
+        gridPathCells,
+        guidePath.__gridMeta
+      );
       break;
     }
 
@@ -787,6 +837,11 @@ function generateStageLayout(stage, startPosition) {
       });
       guidePath.__gridMeta = { minX: gridMinX, minZ: gridMinZ, cell: gridCell, cols, rows };
       guidePath.__gridPathCells = gridPathCells;
+      guidePath.__gridSafeMask = buildGridSafeMask(
+        guidePath,
+        gridPathCells,
+        guidePath.__gridMeta
+      );
     }
     return {
       goalPosition: goal,
@@ -825,8 +880,11 @@ function generateStageLayout(stage, startPosition) {
   // Min center distance = obstacleSize + (droneWidth * multiplier).
   const droneWidth = 1.0;
   const minGapMultiplierByStage = stage === 4 ? 2.5 : stage === 5 ? 2.0 : stage === 6 ? 1.5 : 0;
+  const areaSpacingBoost = obstacleAreaExtra > 0 ? obstacleAreaExtra * 1.4 : 0;
   const minObstacleCenterDist =
-    minGapMultiplierByStage > 0 ? obstacleSize + droneWidth * minGapMultiplierByStage : obstacleSize * 1.85;
+    minGapMultiplierByStage > 0
+      ? effectiveObstacleSize + droneWidth * minGapMultiplierByStage + areaSpacingBoost
+      : effectiveObstacleSize * 1.85;
 
   let safety = 0;
   while (obstacles.length < obstacleCount && safety < 8000) {
@@ -905,16 +963,17 @@ function generateStageLayout(stage, startPosition) {
     }
   }
 
-  // UI 9~11단계(gameplay stage 4~6): restrict movement to a rectangle that contains
+  // UI 6~11단계(gameplay stage 1~6): restrict movement to a rectangle that contains
   // start position + goal + all obstacles, to encourage passing between obstacles.
   let movementRect = null;
-  if (stage >= 4 && stage <= 6 && obstacles.length > 0) {
+  if (stage >= 1 && stage <= 6 && obstacles.length > 0) {
     let minX = Math.min(startPosition[0], goal[0], ...obstacles.map((o) => o[0]));
     let maxX = Math.max(startPosition[0], goal[0], ...obstacles.map((o) => o[0]));
     let minZ = Math.min(startPosition[2], goal[2], ...obstacles.map((o) => o[2]));
     let maxZ = Math.max(startPosition[2], goal[2], ...obstacles.map((o) => o[2]));
-    // Add a margin: obstacle half-size + some drone clearance
-    const margin = obstacleSize * 0.7 + 0.9;
+    // 6~8단계는 더 타이트하게, 9~11단계는 기존 대비 약간 타이트하게.
+    const marginBase = stage <= 3 ? 0.45 : 0.75;
+    const margin = effectiveObstacleSize * 0.55 + marginBase;
     minX -= margin;
     maxX += margin;
     minZ -= margin;
@@ -925,7 +984,7 @@ function generateStageLayout(stage, startPosition) {
   return {
     goalPosition: goal,
     obstaclePositions: obstacles,
-    obstacleSize,
+    obstacleSize: effectiveObstacleSize,
     guidePath: null,
     movementRect,
   };
@@ -1013,8 +1072,8 @@ function Ground() {
 function ControlYellowFloor({ uiStage }) {
   // 1~11 단계: 전체 바닥을 노랑 계열로 반투명 표시
   if (uiStage > 11) return null;
-  // UI 9~11단계는 이동 가능 영역을 직사각형으로 제한하므로, 전체 바닥 표시를 끈다.
-  if (uiStage >= 9 && uiStage <= 11) return null;
+  // UI 6~11단계는 이동 가능 영역을 직사각형으로 제한하므로, 전체 바닥 표시를 끈다.
+  if (uiStage >= 6 && uiStage <= 11) return null;
   const size = uiStage <= 6 ? 26 : 34;
   return (
     <mesh position={[0, 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]}>
@@ -1039,8 +1098,8 @@ function MovementRectFloor({ movementRect }) {
 }
 
 function Goal({ position, stage, uiStage }) {
-  const goalLabel = uiStage >= 12 ? "착륙 지점" : "목표물";
-  const showGoalLabel = uiStage >= 6 && uiStage <= 15;
+  const goalLabel = uiStage >= 15 ? "착륙 지점" : "목표물";
+  const showGoalLabel = uiStage >= 6 && uiStage <= 25;
   const goalLabelClassName =
     "px-2 py-1 rounded bg-green-600/90 text-white text-2xl font-semibold whitespace-nowrap";
   if (stage <= 6) {
@@ -1074,7 +1133,7 @@ function Goal({ position, stage, uiStage }) {
 
   // 7~10단계: 바닥 착륙 목표(패드)
   const radius = getStageGoalRadius(stage);
-  const landingRadius = uiStage >= 12 ? radius * 0.72 : radius * 0.82;
+  const landingRadius = uiStage >= 15 ? radius * 0.72 : radius * 0.82;
   return (
     <group>
       <BoxShadow
@@ -1106,7 +1165,7 @@ function Goal({ position, stage, uiStage }) {
 
 function Obstacle({ position, size = 1.5, uiStage }) {
   const pillarHeight = 20;
-  const showObstacleLabel = uiStage >= 6 && uiStage <= 11;
+  const showObstacleLabel = uiStage >= 6 && uiStage <= 14;
 
   return (
     <group>
@@ -1139,7 +1198,13 @@ function Obstacle({ position, size = 1.5, uiStage }) {
   );
 }
 
-function DroneVisual({ spinActive = true, spinSpeed = 34, spinStateRef = null, sizeScale = 0.82 }) {
+function DroneVisual({
+  spinActive = true,
+  spinSpeed = 34,
+  spinStateRef = null,
+  sizeScale = 0.82,
+  lockLateralTilt = false,
+}) {
   const armY = 0.08;
   const armOffset = 0.28;
   const motorOffset = 0.43;
@@ -1169,7 +1234,9 @@ function DroneVisual({ spinActive = true, spinSpeed = 34, spinStateRef = null, s
       const keyY =
         (spinStateRef.current.keys?.forward ? -1 : 0) +
         (spinStateRef.current.keys?.backward ? 1 : 0);
-      const sx = clamp((spinStateRef.current.rightStick?.x ?? 0) + keyX, -1, 1);
+      const sx = lockLateralTilt
+        ? 0
+        : clamp((spinStateRef.current.rightStick?.x ?? 0) + keyX, -1, 1);
       const sy = clamp((spinStateRef.current.rightStick?.y ?? 0) + keyY, -1, 1);
       const targetPitch = sy * 0.29;
       const targetRoll = -sx * 0.25;
@@ -1277,12 +1344,16 @@ const GroundGuidePath = memo(function GroundGuidePath({
   const floorThickness = 0.03;
   const wallThickness = 0.08;
   const wallHeight = 18;
-  // 12~15단계(게임플레이 7~10) 끝 구간 중심 오차를 줄이기 위해 해상도를 조금 높인다.
-  const useGridMask = stage >= 12 && gridMeta && gridPathCells && Array.isArray(gridPathCells) && gridMeta.cols && gridMeta.rows;
-  const cell = stage >= 12 ? (gridMeta?.cell ?? 0.1) : stage >= 7 ? 0.14 : 0.1;
-  // When rasterizing onto the grid, cells exactly on a joint/knot boundary can be skipped.
-  // Add a small padding so segment fill visually continues through kink points.
-  const rasterPadding = stage >= 12 ? cell * 0.22 : cell * 0.12;
+  // gameplay stage 7+ : grid mask 기반 바닥/벽 (UI 15~25 포함)
+  const useGridMask =
+    stage >= 7 &&
+    gridMeta &&
+    gridPathCells &&
+    Array.isArray(gridPathCells) &&
+    gridMeta.cols &&
+    gridMeta.rows;
+  const cell = useGridMask ? (gridMeta?.cell ?? 0.1) : stage >= 7 ? 0.14 : 0.1;
+  const rasterPadding = stage >= 7 ? cell * 0.22 : cell * 0.12;
   const wallOuterOffset = wallThickness * 0.5 + 0.08;
   const centerSafeRadius = 1.75;
   const centerSafeSize = 3.2;
@@ -1373,17 +1444,20 @@ const GroundGuidePath = memo(function GroundGuidePath({
     }
   };
 
-  if (stage >= 12) {
+  if (stage >= 7) {
     if (useGridMask) {
-      // 12~15: use the precomputed safe mask from generateStageLayout (shared with collision & walls)
-      const mask = guidePath?.__gridSafeMask;
+      let mask = guidePath?.__gridSafeMask;
+      if ((!mask || mask.length !== fillGrid.length) && gridMeta) {
+        mask = buildGridSafeMask(guidePath, gridPathCells, gridMeta);
+        if (guidePath && mask) guidePath.__gridSafeMask = mask;
+      }
       if (mask && mask.length === fillGrid.length) {
         fillGrid.set(mask);
       }
     } else {
       // fallback: no gridPathCells => keep previous guidePath-based stamping
       const halfVisualWidth =
-        stage >= 12 ? Math.max(0.05, width * 0.5 - (stage <= 13 ? 0.04 : 0.1)) : (width + 0.02) * 0.5;
+        stage >= 7 ? Math.max(0.05, width * 0.5 - (stage <= 8 ? 0.04 : 0.1)) : (width + 0.02) * 0.5;
       const edgePad = rasterPadding * 0.6;
       const tHalf = halfVisualWidth + edgePad;
       const brushHalf = tHalf * 1.02;
@@ -1487,7 +1561,7 @@ const GroundGuidePath = memo(function GroundGuidePath({
 
   const has = (x, z) => x >= 0 && x < cols && z >= 0 && z < rows && fillGrid[idx(x, z)] === 1;
   const floorMeshes = [];
-  if (stage >= 12) {
+  if (stage >= 7) {
     // stage>=12에서는 셀 단위 렌더링 대신, 연속된 filled 셀을 사각형으로 merge해서
     // mesh 개수를 줄인다.
     const visited = new Uint8Array(cols * rows);
@@ -2004,6 +2078,7 @@ function ControlDrone({
   onSuccess,
   onTutorialLeftStickInput,
   onTutorialMoveInput,
+  onTutorialStage4ComboInput,
   onTutorialLandingComplete,
 }) {
   const droneRef = useRef(null);
@@ -2083,13 +2158,24 @@ function ControlDrone({
           rightX +
           (c.keys.left ? -1 : 0) +
           (c.keys.right ? 1 : 0);
+        // UI 12~14, 24~25단계: 오른쪽 조이스틱 좌우(스트레이프) 금지
+        if (
+          !isTutorialStage &&
+          ((uiStage >= 12 && uiStage <= 14) || (uiStage >= 24 && uiStage <= 25))
+        ) {
+          inputStrafe = 0;
+        }
 
         yawInput = clamp(yawInput, -1, 1);
         inputVertical = clamp(inputVertical, -1, 1);
         inputForward = clamp(inputForward, -1, 1);
         inputStrafe = clamp(inputStrafe, -1, 1);
-        if (onTutorialLeftStickInput) onTutorialLeftStickInput(inputVertical, yawInput);
-        if (onTutorialMoveInput) onTutorialMoveInput(inputForward, inputStrafe);
+        if (isTutorialStage && uiStage === 4 && onTutorialStage4ComboInput) {
+          onTutorialStage4ComboInput(yawInput, inputStrafe);
+        } else {
+          if (onTutorialLeftStickInput) onTutorialLeftStickInput(inputVertical, yawInput);
+          if (onTutorialMoveInput) onTutorialMoveInput(inputForward, inputStrafe);
+        }
 
         c.rotation += yawInput * c.yawSpeed * delta;
 
@@ -2156,7 +2242,7 @@ function ControlDrone({
 
       // 6~11단계: 장애물 충돌 판정을 약간 더 타이트하게(덜 후하게) 조정
       const obstacleHitRadius =
-        uiStage >= 6 && uiStage <= 11
+        uiStage >= 6 && uiStage <= 14
           ? Math.max(0.85, obstacleSize * 0.55)
           : Math.max(1.0, obstacleSize * 0.7);
       const hasCrash =
@@ -2167,10 +2253,10 @@ function ControlDrone({
           )
         );
 
-      // UI 9~11단계(gameplay stage 4~6): restrict movement to a simple rectangle region.
+      // UI 6~14단계(gameplay stage 1~6): restrict movement to a rectangle region.
       const isOffMovementRect =
         !isTutorialStage &&
-        stage >= 4 &&
+        stage >= 1 &&
         stage <= 6 &&
         movementRect &&
         collisionSamples.some(
@@ -2225,9 +2311,15 @@ function ControlDrone({
     droneRef.current.position.set(c.position[0], c.position[1], c.position[2]);
     // Apply visible body tilt while moving with right pad.
     const keyboardPitch = (c.keys.forward ? -1 : 0) + (c.keys.backward ? 1 : 0);
-    const keyboardRoll = (c.keys.left ? -1 : 0) + (c.keys.right ? 1 : 0);
+    const shouldLockLateralTilt =
+      !isTutorialStage && ((uiStage >= 12 && uiStage <= 14) || (uiStage >= 24 && uiStage <= 25));
+    const keyboardRoll = shouldLockLateralTilt
+      ? 0
+      : (c.keys.left ? -1 : 0) + (c.keys.right ? 1 : 0);
     const targetPitch = clamp(c.rightStick.y + keyboardPitch, -1, 1) * 0.275;
-    const targetRoll = clamp(c.rightStick.x + keyboardRoll, -1, 1) * -0.225;
+    const targetRoll = shouldLockLateralTilt
+      ? 0
+      : clamp(c.rightStick.x + keyboardRoll, -1, 1) * -0.225;
     const currentPitch = droneRef.current.rotation.x;
     const currentRoll = droneRef.current.rotation.z;
     const nextPitch = currentPitch + (targetPitch - currentPitch) * 0.2;
@@ -2262,7 +2354,12 @@ function ControlDrone({
       </group>
 
       <group ref={droneRef}>
-        <DroneVisual spinStateRef={controlRef} />
+        <DroneVisual
+          spinStateRef={controlRef}
+          lockLateralTilt={
+            !isTutorialStage && ((uiStage >= 12 && uiStage <= 14) || (uiStage >= 24 && uiStage <= 25))
+          }
+        />
       </group>
     </group>
   );
@@ -2286,6 +2383,7 @@ function ControlScene({
   onSuccess,
   onTutorialLeftStickInput,
   onTutorialMoveInput,
+  onTutorialStage4ComboInput,
   onTutorialLandingComplete,
   cameraMode,
   status,
@@ -2306,14 +2404,14 @@ function ControlScene({
         <ambientLight intensity={0.75} />
         <directionalLight position={[5, 10, 5]} intensity={1} />
         <ControlYellowFloor uiStage={uiStage} />
-        {!isTutorialStage && uiStage >= 9 && uiStage <= 11 && (
+        {!isTutorialStage && uiStage >= 6 && uiStage <= 14 && (
           <MovementRectFloor movementRect={movementRect} />
         )}
         {!isTutorialStage && (
           <GroundGuidePath
             guidePath={guidePath}
             goalPosition={goalPosition}
-            stage={uiStage}
+            stage={stage}
             gridMeta={gridMeta}
             gridPathCells={gridPathCells}
           />
@@ -2339,6 +2437,7 @@ function ControlScene({
           onSuccess={onSuccess}
           onTutorialLeftStickInput={onTutorialLeftStickInput}
           onTutorialMoveInput={onTutorialMoveInput}
+          onTutorialStage4ComboInput={onTutorialStage4ComboInput}
           onTutorialLandingComplete={onTutorialLandingComplete}
         />
         {cameraMode === "fixed" ? (
@@ -2640,13 +2739,26 @@ function ControlMode() {
   const START_POSITION = useMemo(() => [0, GROUNDED_HEIGHT, 0], [GROUNDED_HEIGHT]);
   const START_ROTATION = 0;
   const TUTORIAL_STAGE_COUNT = 5;
-  const CORE_STAGE_COUNT = 10;
+  const CORE_STAGE_COUNT = 20;
   const MAX_STAGE = TUTORIAL_STAGE_COUNT + CORE_STAGE_COUNT;
+  const TUTORIAL_CLEAR_OVERLAY_MS = 2200;
+  const TUTORIAL_CLEAR_ADVANCE_MS = 1600;
+  /** ControlDrone 이륙 스풀(1.5s) 직후 — 미션은 숨기지 않고 이 시점에 (성공) 연출 */
+  const TUTORIAL_TAKEOFF_SUCCESS_START_MS = 1700;
+  /** 단계 내 지시 완료 후 (성공) 표시 시간 — 이후 다음 미션 문구 */
+  const TUTORIAL_INSTRUCTION_SUCCESS_DISPLAY_MS = 1500;
 
   const [stage, setStage] = useState(1);
   const [tutorialStep, setTutorialStep] = useState(0);
+  const [tutorialMissionSuccessActive, setTutorialMissionSuccessActive] =
+    useState(false);
   const getGameplayStage = useCallback(
-    (stageNumber) => Math.max(1, stageNumber - TUTORIAL_STAGE_COUNT),
+    (stageNumber) => {
+      if (stageNumber <= 11) return Math.max(1, stageNumber - TUTORIAL_STAGE_COUNT);
+      // UI 12~14는 9~11의 게임플레이(4~6)를 재사용, 기존 12~15는 15~18로 이동
+      if (stageNumber >= 24) return stageNumber - 11; // UI 24~25 => gameplay 13~14
+      return Math.max(1, stageNumber - 8);
+    },
     [TUTORIAL_STAGE_COUNT]
   );
   const createTutorialLayout = useCallback(
@@ -2712,6 +2824,10 @@ function ControlMode() {
   const [showActionButtons, setShowActionButtons] = useState(true);
   const missionTimerRef = useRef(null);
   const tutorialAdvanceTimerRef = useRef(null);
+  const tutorialStepSuccessTimerRef = useRef(null);
+  const tutorialSuccessTimerRef = useRef(null);
+  const tutorialCelebrationActiveRef = useRef(false);
+  const tutorialInputLockedRef = useRef(false);
   const [status, setStatus] = useState({
     position: START_POSITION,
     rotation: START_ROTATION,
@@ -2745,10 +2861,10 @@ function ControlMode() {
       ],
       4: [
         "이륙 버튼을 누르세요.",
-        "왼쪽 조이스틱을 오른쪽으로 밀어 오른쪽으로 도세요.",
-        "오른쪽 조이스틱을 오른쪽으로 밀어 이동하세요.",
-        "왼쪽 조이스틱을 왼쪽으로 밀어 왼쪽으로 도세요.",
-        "오른쪽 조이스틱을 왼쪽으로 밀어 이동하세요.",
+        "왼쪽 조이스틱은 왼쪽으로, 오른쪽 조이스틱은 왼쪽으로 동시에 밀어 보세요.",
+        "왼쪽 조이스틱은 오른쪽으로, 오른쪽 조이스틱은 오른쪽으로 동시에 밀어 보세요.",
+        "왼쪽 조이스틱은 왼쪽으로, 오른쪽 조이스틱은 오른쪽으로 동시에 밀어 보세요.",
+        "왼쪽 조이스틱은 오른쪽으로, 오른쪽 조이스틱은 왼쪽으로 동시에 밀어 보세요.",
         "착륙 버튼을 누르세요.",
       ],
       5: [
@@ -2764,6 +2880,13 @@ function ControlMode() {
     isTutorialStage && tutorialStep < tutorialMessages.length
       ? tutorialMessages[tutorialStep]
       : "";
+  const isNoStrafeMissionStage =
+    !isTutorialStage && ((stage >= 12 && stage <= 14) || (stage >= 24 && stage <= 25));
+  const controlMissionMessage =
+    isNoStrafeMissionStage
+      ? "미션: '좌우' 이동 사용하지 않고 목표물에 도달하기"
+      : "";
+  const isHeadlessDisabled = isNoStrafeMissionStage;
 
   const triggerMissionDelay = useCallback((ms = 1400) => {
     // Keep the stage title visible; only delay mission instructions + action buttons.
@@ -2775,6 +2898,24 @@ function ControlMode() {
       setShowActionButtons(true);
       missionTimerRef.current = null;
     }, ms);
+  }, []);
+
+  const cancelTutorialStageAdvance = useCallback(() => {
+    if (tutorialSuccessTimerRef.current) {
+      clearTimeout(tutorialSuccessTimerRef.current);
+      tutorialSuccessTimerRef.current = null;
+    }
+    if (tutorialAdvanceTimerRef.current) {
+      clearTimeout(tutorialAdvanceTimerRef.current);
+      tutorialAdvanceTimerRef.current = null;
+    }
+    if (tutorialStepSuccessTimerRef.current) {
+      clearTimeout(tutorialStepSuccessTimerRef.current);
+      tutorialStepSuccessTimerRef.current = null;
+    }
+    tutorialCelebrationActiveRef.current = false;
+    tutorialInputLockedRef.current = false;
+    setTutorialMissionSuccessActive(false);
   }, []);
 
   const resetToFixedCameraView = useCallback(() => {
@@ -2791,6 +2932,8 @@ function ControlMode() {
     if (stage === 4) return "4단계 : 회전 조작";
     if (stage === 5) return "5단계 : 자유 비행";
     if (stage >= 6 && stage <= 11) return `${stage}단계 : 장애물 피해 목표 도달하기`;
+    if (stage >= 12 && stage <= 14) return `${stage}단계 : 좌우 이동 금지 목표 도달`;
+    if (stage >= 24 && stage <= 25) return `${stage}단계 : 좌우 이동 금지 목표 도달`;
     return `${stage}단계 : 벽을 피해 목표지점 착륙하기`;
   }, [stage]);
   const getSpawnPosition = useCallback((layout, stageNumber = stage) => {
@@ -2981,6 +3124,52 @@ function ControlMode() {
     n2.stop(now + 0.35);
   }, [ensureAudioGraph]);
 
+  /** 튜토리얼 단계 내 지시 완료 — 통과음과 달리 짧은 이중 ‘플럭’ 느낌 알림 */
+  const playTutorialInstructionSuccessSound = useCallback(() => {
+    const store = ensureAudioGraph();
+    if (!store || !store.ctx || !store.master) return;
+    if (store.ctx.state === "suspended") {
+      store.ctx.resume();
+    }
+    const ctx = store.ctx;
+    const now = ctx.currentTime;
+    const pluck = (start, f0, f1) => {
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(f0, start);
+      osc.frequency.exponentialRampToValueAtTime(f1, start + 0.11);
+      g.gain.setValueAtTime(0.0001, start);
+      g.gain.exponentialRampToValueAtTime(0.1, start + 0.006);
+      g.gain.exponentialRampToValueAtTime(0.0001, start + 0.16);
+      osc.connect(g);
+      g.connect(store.master);
+      osc.start(start);
+      osc.stop(start + 0.18);
+    };
+    pluck(now, 1320, 440);
+    pluck(now + 0.09, 1650, 550);
+  }, [ensureAudioGraph]);
+
+  const scheduleTutorialStepSuccess = useCallback(
+    (nextStep) => {
+      if (tutorialInputLockedRef.current) return;
+      tutorialInputLockedRef.current = true;
+      playTutorialInstructionSuccessSound();
+      setTutorialMissionSuccessActive(true);
+      if (tutorialStepSuccessTimerRef.current) {
+        clearTimeout(tutorialStepSuccessTimerRef.current);
+      }
+      tutorialStepSuccessTimerRef.current = setTimeout(() => {
+        tutorialStepSuccessTimerRef.current = null;
+        setTutorialStep(nextStep);
+        setTutorialMissionSuccessActive(false);
+        tutorialInputLockedRef.current = false;
+      }, TUTORIAL_INSTRUCTION_SUCCESS_DISPLAY_MS);
+    },
+    [playTutorialInstructionSuccessSound, TUTORIAL_INSTRUCTION_SUCCESS_DISPLAY_MS]
+  );
+
   const playFinalCelebrationSound = useCallback(() => {
     const store = ensureAudioGraph();
     if (!store || !store.ctx || !store.master) return;
@@ -3055,7 +3244,7 @@ function ControlMode() {
   }, [ensureAudioGraph]);
 
   const showStageClearOverlay = useCallback(
-    (clearedStageNumber, elapsed = null) => {
+    (clearedStageNumber, elapsed = null, messageDurationMs = 1300) => {
       setCenterOverlayType("clear");
       const timing =
         typeof elapsed === "number" && Number.isFinite(elapsed)
@@ -3066,7 +3255,7 @@ function ControlMode() {
       if (overlayTimerRef.current) clearTimeout(overlayTimerRef.current);
       overlayTimerRef.current = setTimeout(() => {
         setCenterOverlayMessage("");
-      }, 1300);
+      }, messageDurationMs);
     },
     [playStageClearSound]
   );
@@ -3116,17 +3305,35 @@ function ControlMode() {
       setElapsedSeconds(0);
       setIsStopwatchRunning(true);
     }
-    // 1~5단계: 이륙 후 1.5초 뒤 다음 미션/지시가 뜨게 함
+    // 1~5단계: 미션 패널은 계속 보이게 두고, 스풀 종료 시점에 맞춰 (성공) → 다음 지시
     if (stage >= 1 && stage <= 5 && tutorialStep === 0) {
-      triggerMissionDelay(1500);
       if (tutorialAdvanceTimerRef.current) clearTimeout(tutorialAdvanceTimerRef.current);
+      if (tutorialStepSuccessTimerRef.current) {
+        clearTimeout(tutorialStepSuccessTimerRef.current);
+        tutorialStepSuccessTimerRef.current = null;
+      }
       tutorialAdvanceTimerRef.current = setTimeout(() => {
-        setTutorialStep(1);
         tutorialAdvanceTimerRef.current = null;
-      }, 1500);
+        playTutorialInstructionSuccessSound();
+        setTutorialMissionSuccessActive(true);
+        tutorialStepSuccessTimerRef.current = setTimeout(() => {
+          tutorialStepSuccessTimerRef.current = null;
+          setTutorialStep(1);
+          setTutorialMissionSuccessActive(false);
+        }, TUTORIAL_INSTRUCTION_SUCCESS_DISPLAY_MS);
+      }, TUTORIAL_TAKEOFF_SUCCESS_START_MS);
     }
     syncStatus();
-  }, [GROUNDED_HEIGHT, playTakeoffBeepThenRotor, stage, syncStatus, triggerMissionDelay, tutorialStep]);
+  }, [
+    GROUNDED_HEIGHT,
+    playTakeoffBeepThenRotor,
+    playTutorialInstructionSuccessSound,
+    stage,
+    syncStatus,
+    tutorialStep,
+    TUTORIAL_INSTRUCTION_SUCCESS_DISPLAY_MS,
+    TUTORIAL_TAKEOFF_SUCCESS_START_MS,
+  ]);
 
   const land = useCallback(() => {
     const c = controlRef.current;
@@ -3168,6 +3375,7 @@ function ControlMode() {
   }, [land, status.isFlying, takeOff]);
 
   function resetAll() {
+    cancelTutorialStageAdvance();
     const c = controlRef.current;
     const nextLayout = getLayoutForStage(1);
     const spawn = getSpawnPosition(nextLayout, 1);
@@ -3207,6 +3415,7 @@ function ControlMode() {
   }
 
   const resetStageOnly = useCallback((layoutOverride, stageOverride) => {
+    cancelTutorialStageAdvance();
     const c = controlRef.current;
     const layout = layoutOverride || stageLayout;
     const targetStage = typeof stageOverride === "number" ? stageOverride : stage;
@@ -3241,98 +3450,121 @@ function ControlMode() {
     };
     setStatus((prev) => ({ ...prev, position: spawn }));
     syncStatus();
-  }, [getSpawnPosition, stage, stageLayout, stopRotorSound, syncStatus]);
+  }, [
+    cancelTutorialStageAdvance,
+    getSpawnPosition,
+    stage,
+    stageLayout,
+    stopRotorSound,
+    syncStatus,
+  ]);
 
   const handleTutorialLeftStickInput = useCallback(
     (inputVertical, yawInput) => {
+      if (tutorialInputLockedRef.current) return;
       if (stage === 2) {
-        if (tutorialStep === 1 && inputVertical > 0.35) setTutorialStep(2);
-        if (tutorialStep === 2 && inputVertical < -0.35) setTutorialStep(3);
+        if (tutorialStep === 1 && inputVertical > 0.35) scheduleTutorialStepSuccess(2);
+        if (tutorialStep === 2 && inputVertical < -0.35) scheduleTutorialStepSuccess(3);
         // leftStick.x uses inverted sign in control mapping
         // so "right push" => yawInput < 0, "left push" => yawInput > 0
-        if (tutorialStep === 3 && yawInput < -0.35) setTutorialStep(4);
-        if (tutorialStep === 4 && yawInput > 0.35) setTutorialStep(5);
-      }
-      if (stage === 4) {
-        if (tutorialStep === 1 && yawInput < -0.35) setTutorialStep(2);
-        else if (tutorialStep === 3 && yawInput > 0.35) setTutorialStep(4);
+        if (tutorialStep === 3 && yawInput < -0.35) scheduleTutorialStepSuccess(4);
+        if (tutorialStep === 4 && yawInput > 0.35) scheduleTutorialStepSuccess(5);
       }
     },
-    [stage, tutorialStep]
+    [scheduleTutorialStepSuccess, stage, tutorialStep]
+  );
+
+  const handleTutorialStage4ComboInput = useCallback(
+    (yawInput, inputStrafe) => {
+      if (tutorialInputLockedRef.current) return;
+      if (stage !== 4) return;
+      // leftStick: 물리적 왼쪽 밀기 → yawInput > 0, 오른쪽 → yawInput < 0 (코멘트와 동일)
+      // rightStick: 왼쪽 밀기 → inputStrafe < 0, 오른쪽 → inputStrafe > 0 (3단계와 동일)
+      const leftStickLeft = yawInput > 0.35;
+      const rightStickLeft = inputStrafe < -0.35;
+      const leftStickRight = yawInput < -0.35;
+      const rightStickRight = inputStrafe > 0.35;
+      if (tutorialStep === 1 && leftStickLeft && rightStickLeft) {
+        scheduleTutorialStepSuccess(2);
+      } else if (tutorialStep === 2 && leftStickRight && rightStickRight) {
+        scheduleTutorialStepSuccess(3);
+      } else if (tutorialStep === 3 && leftStickLeft && rightStickRight) {
+        scheduleTutorialStepSuccess(4);
+      } else if (tutorialStep === 4 && leftStickRight && rightStickLeft) {
+        scheduleTutorialStepSuccess(5);
+      }
+    },
+    [scheduleTutorialStepSuccess, stage, tutorialStep]
   );
 
   const handleTutorialMoveInput = useCallback(
     (inputForward, inputStrafe) => {
+      if (tutorialInputLockedRef.current) return;
       if (stage === 3) {
-        if (tutorialStep === 1 && inputForward > 0.35) setTutorialStep(2);
-        else if (tutorialStep === 2 && inputForward < -0.35) setTutorialStep(3);
-        else if (tutorialStep === 3 && inputStrafe < -0.35) setTutorialStep(4);
-        else if (tutorialStep === 4 && inputStrafe > 0.35) setTutorialStep(5);
-      }
-      if (stage === 4) {
-        if (tutorialStep === 2 && inputStrafe > 0.35) setTutorialStep(3);
-        else if (tutorialStep === 4 && inputStrafe < -0.35) setTutorialStep(5);
+        if (tutorialStep === 1 && inputForward > 0.35) scheduleTutorialStepSuccess(2);
+        else if (tutorialStep === 2 && inputForward < -0.35) scheduleTutorialStepSuccess(3);
+        else if (tutorialStep === 3 && inputStrafe < -0.35) scheduleTutorialStepSuccess(4);
+        else if (tutorialStep === 4 && inputStrafe > 0.35) scheduleTutorialStepSuccess(5);
       }
     },
-    [stage, tutorialStep]
+    [scheduleTutorialStepSuccess, stage, tutorialStep]
   );
 
   const handleTutorialLandingComplete = useCallback(() => {
-    if (stage === 1 && tutorialStep === 1) {
-      showStageClearOverlay(1);
-      markStageCompleted(1);
-      const nextStage = 2;
+    if (tutorialCelebrationActiveRef.current) return;
+
+    const scheduleTutorialStageAdvance = (clearedStageNumber, nextStage) => {
+      tutorialCelebrationActiveRef.current = true;
+      if (tutorialSuccessTimerRef.current) {
+        clearTimeout(tutorialSuccessTimerRef.current);
+        tutorialSuccessTimerRef.current = null;
+      }
+      showStageClearOverlay(clearedStageNumber, null, TUTORIAL_CLEAR_OVERLAY_MS);
+      markStageCompleted(clearedStageNumber);
+      setTutorialMissionSuccessActive(true);
       const nextLayout = getLayoutForStage(nextStage);
-      setStage(nextStage);
-      setTutorialStep(0);
-      setStageLayout(nextLayout);
-      resetStageOnly(nextLayout, nextStage);
+      tutorialSuccessTimerRef.current = setTimeout(() => {
+        tutorialSuccessTimerRef.current = null;
+        tutorialCelebrationActiveRef.current = false;
+        setTutorialMissionSuccessActive(false);
+        resetToFixedCameraView();
+        triggerMissionDelay(1400);
+        setStage(nextStage);
+        setTutorialStep(0);
+        setStageLayout(nextLayout);
+        resetStageOnly(nextLayout, nextStage);
+      }, TUTORIAL_CLEAR_ADVANCE_MS);
+    };
+
+    if (stage === 1 && tutorialStep === 1) {
+      scheduleTutorialStageAdvance(1, 2);
       return;
     }
     if (stage === 2 && tutorialStep === 5) {
-      showStageClearOverlay(2);
-      markStageCompleted(2);
-      const nextStage = 3;
-      const nextLayout = getLayoutForStage(nextStage);
-      setStage(nextStage);
-      setTutorialStep(0);
-      setStageLayout(nextLayout);
-      resetStageOnly(nextLayout, nextStage);
+      scheduleTutorialStageAdvance(2, 3);
       return;
     }
     if (stage === 3 && tutorialStep === 5) {
-      showStageClearOverlay(3);
-      markStageCompleted(3);
-      const nextStage = 4;
-      const nextLayout = getLayoutForStage(nextStage);
-      setStage(nextStage);
-      setTutorialStep(0);
-      setStageLayout(nextLayout);
-      resetStageOnly(nextLayout, nextStage);
+      scheduleTutorialStageAdvance(3, 4);
       return;
     }
     if (stage === 4 && tutorialStep === 5) {
-      showStageClearOverlay(4);
-      markStageCompleted(4);
-      const nextStage = 5;
-      const nextLayout = getLayoutForStage(nextStage);
-      setStage(nextStage);
-      setTutorialStep(0);
-      setStageLayout(nextLayout);
-      resetStageOnly(nextLayout, nextStage);
+      scheduleTutorialStageAdvance(4, 5);
       return;
     }
     if (stage === 5 && tutorialStep >= 1) {
-      showStageClearOverlay(5);
-      markStageCompleted(5);
-      const nextStage = 6;
-      const nextLayout = getLayoutForStage(nextStage);
-      setStage(nextStage);
-      setTutorialStep(0);
-      setStageLayout(nextLayout);
-      resetStageOnly(nextLayout, nextStage);
+      scheduleTutorialStageAdvance(5, 6);
     }
-  }, [getLayoutForStage, markStageCompleted, resetStageOnly, showStageClearOverlay, stage, tutorialStep]);
+  }, [
+    getLayoutForStage,
+    markStageCompleted,
+    resetStageOnly,
+    resetToFixedCameraView,
+    showStageClearOverlay,
+    stage,
+    triggerMissionDelay,
+    tutorialStep,
+  ]);
 
   const handleCrashWithEffect = useCallback(() => {
     const c = controlRef.current;
@@ -3440,10 +3672,21 @@ function ControlMode() {
   }, [isStopwatchRunning, syncStatus]);
 
   useEffect(() => {
-    if (!status.isFlying && !status.isSpooling && !status.isGroundRotorSpin) {
+    const shouldKeepRotorOn =
+      status.isFlying || status.isSpooling || status.isLanding || status.isGroundRotorSpin;
+    if (shouldKeepRotorOn) {
+      startRotorSound();
+    } else {
       stopRotorSound();
     }
-  }, [status.isFlying, status.isSpooling, status.isGroundRotorSpin, stopRotorSound]);
+  }, [
+    startRotorSound,
+    status.isFlying,
+    status.isGroundRotorSpin,
+    status.isLanding,
+    status.isSpooling,
+    stopRotorSound,
+  ]);
 
   useEffect(() => {
     function handleKeyDown(e) {
@@ -3679,12 +3922,23 @@ function ControlMode() {
   }, [isPortrait, isSmallScreen]);
 
   useEffect(() => {
+    // 12~14단계에서는 헤드리스 조종을 비활성화
+    if (isHeadlessDisabled && controlMode === "headless") {
+      setControlMode("normal");
+    }
+  }, [controlMode, isHeadlessDisabled]);
+
+  useEffect(() => {
     return () => {
       if (crashTimerRef.current) clearTimeout(crashTimerRef.current);
       if (successTimerRef.current) clearTimeout(successTimerRef.current);
       if (overlayTimerRef.current) clearTimeout(overlayTimerRef.current);
       if (missionTimerRef.current) clearTimeout(missionTimerRef.current);
       if (tutorialAdvanceTimerRef.current) clearTimeout(tutorialAdvanceTimerRef.current);
+      if (tutorialStepSuccessTimerRef.current) {
+        clearTimeout(tutorialStepSuccessTimerRef.current);
+      }
+      if (tutorialSuccessTimerRef.current) clearTimeout(tutorialSuccessTimerRef.current);
     };
   }, []);
 
@@ -3723,12 +3977,25 @@ function ControlMode() {
                 기본조종
               </button>
               <button
-                onClick={() => setControlMode("headless")}
-                className={`flex-1 px-2 py-1 rounded-lg font-semibold text-[11px] sm:text-xs ${
-                  controlMode === "headless" ? "bg-blue-500 text-white" : "bg-gray-200 text-gray-800"
+                onClick={() => {
+                  if (!isHeadlessDisabled) setControlMode("headless");
+                }}
+                disabled={isHeadlessDisabled}
+                className={`relative flex-1 px-2 py-1 rounded-lg font-semibold text-[11px] sm:text-xs ${
+                  isHeadlessDisabled
+                    ? "bg-gray-100 text-gray-400 cursor-not-allowed"
+                    : controlMode === "headless"
+                      ? "bg-blue-500 text-white"
+                      : "bg-gray-200 text-gray-800"
                 }`}
               >
                 헤드리스조종
+                {isHeadlessDisabled && (
+                  <span
+                    className="pointer-events-none absolute left-1.5 right-1.5 top-1/2 -translate-y-1/2 border-t-2 border-gray-400/80"
+                    aria-hidden="true"
+                  />
+                )}
               </button>
             </div>
 
@@ -3771,7 +4038,10 @@ function ControlMode() {
               <div className="text-[10px] leading-4 text-gray-500 bg-white/70 rounded-lg p-2">
                 왼쪽 스틱: 상승/하강 + 좌우 회전
                 <br />
-                오른쪽 스틱: 전진/후진 + 좌우 이동
+                오른쪽 스틱: 전진/후진{" "}
+                {((stage >= 12 && stage <= 14) || (stage >= 24 && stage <= 25))
+                  ? "(좌우 이동 잠금)"
+                  : "+ 좌우 이동"}
                 <br />
                 키보드 조종법: WASD / IJKL, Space 이륙/착륙
               </div>
@@ -3804,6 +4074,7 @@ function ControlMode() {
                   <button
                     key={stageNumber}
                     onClick={() => {
+                      cancelTutorialStageAdvance();
                       const nextLayout = getLayoutForStage(stageNumber);
                       triggerMissionDelay(1000);
                       resetToFixedCameraView();
@@ -3838,7 +4109,7 @@ function ControlMode() {
         >
           <div
             className={`px-5 py-2 rounded-xl text-white text-sm font-bold shadow-lg ${
-              centerOverlayType === "crash" ? "bg-rose-600/92" : "bg-emerald-600/90"
+              centerOverlayType === "crash" ? "bg-rose-600/92" : "bg-emerald-600/90 stage-clear-pop"
             }`}
           >
             {centerOverlayMessage}
@@ -3864,6 +4135,7 @@ function ControlMode() {
         onSuccess={handleStageSuccess}
         onTutorialLeftStickInput={handleTutorialLeftStickInput}
         onTutorialMoveInput={handleTutorialMoveInput}
+        onTutorialStage4ComboInput={handleTutorialStage4ComboInput}
         onTutorialLandingComplete={handleTutorialLandingComplete}
         cameraMode={cameraMode}
         status={status}
@@ -3881,10 +4153,19 @@ function ControlMode() {
         </div>
       </div>
 
-      {showMission && isTutorialStage && currentTutorialMessage && (
+      {showMission && (isTutorialStage ? currentTutorialMessage : controlMissionMessage) && (
         <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 top-[31%] z-20">
-          <div className="px-4 py-2 rounded-xl bg-indigo-600/90 text-white text-sm font-semibold shadow-lg">
-            {currentTutorialMessage}
+          <div
+            className={`px-4 py-2 rounded-xl text-white text-sm font-semibold shadow-lg transition-colors duration-300 ${
+              isTutorialStage && tutorialMissionSuccessActive
+                ? "tutorial-mission-success-banner"
+                : "bg-indigo-600/90"
+            }`}
+          >
+            <span>{isTutorialStage ? currentTutorialMessage : controlMissionMessage}</span>
+            {isTutorialStage && tutorialMissionSuccessActive && (
+              <span className="ml-1.5 font-bold text-white/95">(성공)</span>
+            )}
           </div>
         </div>
       )}

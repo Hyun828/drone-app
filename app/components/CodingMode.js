@@ -30,6 +30,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
   const [currentCommandId, setCurrentCommandId] = useState(null);
   const [isSuccess, setIsSuccess] = useState(false);
   const [isCrash, setIsCrash] = useState(false);
+  const [centerResult, setCenterResult] = useState(null); // { type: "success" | "error", message: string } | null
   const [dropIndex, setDropIndex] = useState(null);
   const [dragState, setDragState] = useState(null);
   const [dropTarget, setDropTarget] = useState(null);
@@ -42,10 +43,16 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     obstacles: [{ id: 1, x: 2, z: -2, level: 0, color: "#a78bfa", edgeColor: "#7c3aed" }],
     goal: { x: 4, z: -4 },
   }));
-  const [showTopCommandPalette, setShowTopCommandPalette] = useState(false);
-  const [showLeftCommandList, setShowLeftCommandList] = useState(false);
+  const [showTopCommandPalette, setShowTopCommandPalette] = useState(true);
+  const [showLeftCommandList, setShowLeftCommandList] = useState(true);
   const [showObjectMenu, setShowObjectMenu] = useState(true);
+  const [codingMainMode, setCodingMainMode] = useState("mission"); // "edit" | "mission"
+  const [missionStage, setMissionStage] = useState(1);
+  const [completedMissionStages, setCompletedMissionStages] = useState(() => new Set());
+  const [showMissionIntro, setShowMissionIntro] = useState(false);
+  const [showAllMissionsCompletePopup, setShowAllMissionsCompletePopup] = useState(false);
   const [showObstacleColorPicker, setShowObstacleColorPicker] = useState(false);
+  const [isFastExecution, setIsFastExecution] = useState(false);
   const [obstacleColor, setObstacleColor] = useState("#a78bfa");
   const [cameraResetToken, setCameraResetToken] = useState(0);
   const [isSmallScreen, setIsSmallScreen] = useState(false);
@@ -64,6 +71,8 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
   });
   const runTokenRef = useRef(0);
   const nextCommandIdRef = useRef(2);
+  const allMissionsCelebrationShownRef = useRef(false);
+  const allMissionsCelebrationTimerRef = useRef(null);
   const listContainerRef = useRef(null);
 
   const commandPalette = useMemo(
@@ -86,6 +95,193 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     () => Object.fromEntries(commandPalette.map((c) => [c.type, c.colorClass])),
     [commandPalette]
   );
+  const missionStageConfigs = useMemo(
+    () => ({
+      1: {
+        obstacles: [
+          { x: 2, z: -1, level: 0, color: "#f472b6", edgeColor: darkenHex("#f472b6") },
+          { x: 3, z: -2, level: 0, color: "#a78bfa", edgeColor: darkenHex("#a78bfa") },
+        ],
+        commands: [
+          { type: "이륙" },
+          { type: "앞으로 이동", amount: 4 },
+          { type: "빈칸" },
+          { type: "착륙" },
+        ],
+      },
+      2: {
+        obstacles: [
+          { x: 0, z: -1, level: 0, color: "#f59e0b", edgeColor: darkenHex("#f59e0b") },
+          { x: 1, z: -2, level: 0, color: "#a78bfa", edgeColor: darkenHex("#a78bfa") },
+          { x: 3, z: -3, level: 0, color: "#60a5fa", edgeColor: darkenHex("#60a5fa") },
+        ],
+        commands: [
+          { type: "이륙" },
+          { type: "오른쪽 이동", amount: 4 },
+          { type: "빈칸" },
+          { type: "착륙" },
+        ],
+      },
+      3: {
+        obstacles: [
+          { x: 2, z: -1, level: 0, color: "#f87171", edgeColor: darkenHex("#f87171") },
+          { x: 3, z: -2, level: 0, color: "#f59e0b", edgeColor: darkenHex("#f59e0b") },
+          { x: 1, z: -3, level: 0, color: "#a78bfa", edgeColor: darkenHex("#a78bfa") },
+          { x: 4, z: -2, level: 0, color: "#60a5fa", edgeColor: darkenHex("#60a5fa") },
+          { x: 0, z: -3, level: 0, color: "#94a3b8", edgeColor: darkenHex("#94a3b8") },
+        ],
+        commands: [
+          { type: "이륙" },
+          { type: "앞으로 이동", amount: 2 },
+          { type: "오른쪽 이동", amount: 2 },
+          { type: "앞으로 이동", amount: 2 },
+          { type: "빈칸" },
+          { type: "착륙" },
+        ],
+      },
+      4: {
+        obstacles: [
+          { x: 2, z: -1, level: 0, color: "#f87171", edgeColor: darkenHex("#f87171") },
+          { x: 3, z: -2, level: 0, color: "#f59e0b", edgeColor: darkenHex("#f59e0b") },
+          { x: 1, z: -3, level: 0, color: "#a78bfa", edgeColor: darkenHex("#a78bfa") },
+          { x: 4, z: -2, level: 0, color: "#60a5fa", edgeColor: darkenHex("#60a5fa") },
+          { x: 0, z: -3, level: 0, color: "#94a3b8", edgeColor: darkenHex("#94a3b8") },
+        ],
+        commands: [
+          { type: "이륙" },
+          {
+            type: "반복",
+            amount: 2,
+            children: [
+              { type: "앞으로 이동", amount: 2 },
+              { type: "빈칸" },
+            ],
+          },
+          { type: "착륙" },
+        ],
+      },
+      5: {
+        obstacles: [
+          { x: 2, z: -1, level: 0, color: "#f472b6", edgeColor: darkenHex("#f472b6") },
+          { x: 3, z: -2, level: 0, color: "#a78bfa", edgeColor: darkenHex("#a78bfa") },
+          { x: 4, z: -3, level: 0, color: "#60a5fa", edgeColor: darkenHex("#60a5fa") },
+        ],
+        commands: [
+          { type: "이륙" },
+          {
+            type: "반복",
+            amount: 4,
+            children: [
+              { type: "앞으로 이동", amount: 1 },
+              { type: "빈칸" },
+            ],
+          },
+          { type: "착륙" },
+        ],
+      },
+      6: {
+        obstacles: [
+          // 기존 6단계: 계단형 배치
+          { x: 1, z: 0, level: 0, color: "#f87171", edgeColor: darkenHex("#f87171") },
+          { x: 2, z: -1, level: 0, color: "#f59e0b", edgeColor: darkenHex("#f59e0b") },
+          { x: 3, z: -2, level: 0, color: "#a78bfa", edgeColor: darkenHex("#a78bfa") },
+          { x: 4, z: -3, level: 0, color: "#60a5fa", edgeColor: darkenHex("#60a5fa") },
+          { x: 0, z: -2, level: 0, color: "#f87171", edgeColor: darkenHex("#f87171") },
+          { x: 1, z: -3, level: 0, color: "#f59e0b", edgeColor: darkenHex("#f59e0b") },
+          { x: 2, z: -4, level: 0, color: "#a78bfa", edgeColor: darkenHex("#a78bfa") },
+          { x: 3, z: -5, level: 0, color: "#60a5fa", edgeColor: darkenHex("#60a5fa") },
+        ],
+        commands: [
+          { type: "이륙" },
+          {
+            type: "반복",
+            amount: 4,
+            children: [{ type: "빈칸" }, { type: "빈칸" }],
+          },
+          { type: "착륙" },
+        ],
+      },
+      7: {
+        obstacles: [
+          { x: 0, z: -2, level: 0, color: "#f59e0b", edgeColor: darkenHex("#f59e0b") },
+          { x: 4, z: -1, level: 0, color: "#a78bfa", edgeColor: darkenHex("#a78bfa") },
+          { x: 1, z: -4, level: 0, color: "#60a5fa", edgeColor: darkenHex("#60a5fa") },
+          { x: 3, z: -2, level: 0, color: "#f472b6", edgeColor: darkenHex("#f472b6") },
+        ],
+        commands: [
+          { type: "이륙" },
+          {
+            type: "반복",
+            amount: 2,
+            children: [
+              { type: "빈칸" },
+              { type: "빈칸" },
+            ],
+          },
+          { type: "앞으로 이동", amount: 2 },
+          { type: "오른쪽 이동", amount: 2 },
+          { type: "착륙" },
+        ],
+      },
+      8: {
+        // 시작 지점 주변을 3칸 높이(level 2)로 둘러, 상승 3회 후에만 이동 가능
+        goal: { x: 2, z: -2 },
+        obstacles: [
+          { x: -1, z: -1, level: 0, color: "#f472b6", edgeColor: darkenHex("#f472b6") },
+          { x: -1, z: -1, level: 1, color: "#f472b6", edgeColor: darkenHex("#f472b6") },
+          { x: -1, z: -1, level: 2, color: "#f472b6", edgeColor: darkenHex("#f472b6") },
+          { x: 0, z: -1, level: 0, color: "#a78bfa", edgeColor: darkenHex("#a78bfa") },
+          { x: 0, z: -1, level: 1, color: "#a78bfa", edgeColor: darkenHex("#a78bfa") },
+          { x: 0, z: -1, level: 2, color: "#a78bfa", edgeColor: darkenHex("#a78bfa") },
+          { x: 1, z: -1, level: 0, color: "#60a5fa", edgeColor: darkenHex("#60a5fa") },
+          { x: 1, z: -1, level: 1, color: "#60a5fa", edgeColor: darkenHex("#60a5fa") },
+          { x: 1, z: -1, level: 2, color: "#60a5fa", edgeColor: darkenHex("#60a5fa") },
+          { x: -1, z: 0, level: 0, color: "#f59e0b", edgeColor: darkenHex("#f59e0b") },
+          { x: -1, z: 0, level: 1, color: "#f59e0b", edgeColor: darkenHex("#f59e0b") },
+          { x: -1, z: 0, level: 2, color: "#f59e0b", edgeColor: darkenHex("#f59e0b") },
+          { x: 1, z: 0, level: 0, color: "#34d399", edgeColor: darkenHex("#34d399") },
+          { x: 1, z: 0, level: 1, color: "#34d399", edgeColor: darkenHex("#34d399") },
+          { x: 1, z: 0, level: 2, color: "#34d399", edgeColor: darkenHex("#34d399") },
+          { x: -1, z: 1, level: 0, color: "#f87171", edgeColor: darkenHex("#f87171") },
+          { x: -1, z: 1, level: 1, color: "#f87171", edgeColor: darkenHex("#f87171") },
+          { x: -1, z: 1, level: 2, color: "#f87171", edgeColor: darkenHex("#f87171") },
+          { x: 0, z: 1, level: 0, color: "#22d3ee", edgeColor: darkenHex("#22d3ee") },
+          { x: 0, z: 1, level: 1, color: "#22d3ee", edgeColor: darkenHex("#22d3ee") },
+          { x: 0, z: 1, level: 2, color: "#22d3ee", edgeColor: darkenHex("#22d3ee") },
+          { x: 1, z: 1, level: 0, color: "#c084fc", edgeColor: darkenHex("#c084fc") },
+          { x: 1, z: 1, level: 1, color: "#c084fc", edgeColor: darkenHex("#c084fc") },
+          { x: 1, z: 1, level: 2, color: "#c084fc", edgeColor: darkenHex("#c084fc") },
+        ],
+        commands: [
+          { type: "이륙" },
+          { type: "상승", amount: 3 },
+          { type: "앞으로 이동", amount: 2 },
+          { type: "빈칸" },
+          { type: "착륙" },
+        ],
+      },
+    }),
+    []
+  );
+  const missionStageNumbers = useMemo(
+    () =>
+      Object.keys(missionStageConfigs)
+        .map(Number)
+        .filter((n) => Number.isFinite(n))
+        .sort((a, b) => a - b),
+    [missionStageConfigs]
+  );
+  const isMissionMode = codingMainMode === "mission";
+  const isBlankCommand = (command) => command?.type === "빈칸";
+  /** 미션 반복 안 빈칸까지 포함 — 얕은 some()만 쓰면 빈칸 없이 실행되는 버그가 난다. */
+  function commandTreeContainsBlank(list) {
+    if (!Array.isArray(list)) return false;
+    return list.some((c) => {
+      if (isBlankCommand(c)) return true;
+      if (Array.isArray(c.children) && c.children.length) return commandTreeContainsBlank(c.children);
+      return false;
+    });
+  }
   const usesMoveAmount = (type) =>
     type === "앞으로 이동" ||
     type === "뒤로 이동" ||
@@ -97,6 +293,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
   const isLoopType = (type) => type === "반복";
   const formatCommandLabel = (command) => {
     if (!command) return "";
+    if (isBlankCommand(command)) return "빈칸 (명령 1개 추가)";
     if (isLoopType(command.type)) {
       const count = Number.isFinite(command.amount) ? command.amount : 1;
       return `${count}번 반복`;
@@ -118,7 +315,19 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
   };
 
   function createCommand(type, amount = null) {
-    const defaultAmount = usesRotationAmount(type) ? 90 : isLoopType(type) ? 1 : amount;
+    const defaultAmount = usesRotationAmount(type)
+      ? Number.isFinite(amount) && amount > 0
+        ? amount
+        : 90
+      : usesMoveAmount(type) || usesVerticalAmount(type)
+        ? Number.isFinite(amount) && amount > 0
+          ? amount
+          : 1
+        : isLoopType(type)
+          ? Number.isFinite(amount) && amount > 0
+            ? amount
+            : 1
+          : amount;
     const normalizedAmount =
       defaultAmount !== null && Number.isFinite(defaultAmount)
         ? Math.max(1, Math.floor(defaultAmount))
@@ -134,6 +343,38 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     return base;
   }
 
+  function createBlankCommand() {
+    return { id: nextCommandIdRef.current++, type: "빈칸", amount: null };
+  }
+
+  function createCommandFromDescriptor(desc) {
+    if (!desc || typeof desc !== "object") return createBlankCommand();
+    if (desc.type === "빈칸") return createBlankCommand();
+    if (desc.type === "반복") {
+      const loop = createCommand("반복", Number.isFinite(desc.amount) ? desc.amount : 1);
+      return {
+        ...loop,
+        missionFixedAmount: true,
+        children: Array.isArray(desc.children)
+          ? desc.children.map((child) => createCommandFromDescriptor(child))
+          : [],
+      };
+    }
+    return {
+      ...createCommand(desc.type, desc.amount ?? null),
+      missionFixedAmount: true,
+    };
+  }
+
+  function buildMissionCommandsWithBlank(stageNumber) {
+    const config = missionStageConfigs[stageNumber];
+    if (!config) return [{ id: 1, type: "이륙", amount: null }];
+    if (!Array.isArray(config.commands) || config.commands.length === 0) {
+      return [{ id: 1, type: "이륙", amount: null }];
+    }
+    return config.commands.map((entry) => createCommandFromDescriptor(entry));
+  }
+
   function resetDroneOnly() {
     runTokenRef.current += 1;
     setDronePosition(START_POSITION);
@@ -147,6 +388,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     if (crashResetTimerRef.current) clearTimeout(crashResetTimerRef.current);
     stopRotorLoop();
+    setCenterResult(null);
   }
 
   function ensureAudioContext() {
@@ -254,7 +496,11 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
   function resetAll() {
     resetDroneOnly();
     // "이륙" 명령은 항상 기본 포함
-    setCommands([{ id: 1, type: "이륙", amount: null }]);
+    if (isMissionMode) {
+      setCommands(buildMissionCommandsWithBlank(missionStage));
+    } else {
+      setCommands([{ id: 1, type: "이륙", amount: null }]);
+    }
   }
 
   function resetDroneAndView() {
@@ -274,12 +520,14 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     if (crashResetTimerRef.current) clearTimeout(crashResetTimerRef.current);
     stopRotorLoop();
+    setCenterResult({ type: "error", message: "실패했습니다! 장애물과 충돌했습니다." });
     crashResetTimerRef.current = setTimeout(() => {
-      resetDroneAndView();
-    }, 2000);
+      resetDroneOnly();
+    }, 1600);
   }
 
   function clearPlacedObjects() {
+    if (isMissionMode) return;
     setPlacedItems({ obstacles: [], goal: null });
   }
 
@@ -290,12 +538,52 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
 
   function clearCommands() {
     if (isRunning) return;
+    if (isMissionMode) return;
     // "이륙" 명령은 항상 기본 포함
     setCommands([{ id: 1, type: "이륙", amount: null }]);
   }
 
+  function openCodingUI() {
+    setShowTopCommandPalette(true);
+    setShowLeftCommandList(true);
+  }
+
+  function closeCodingUI() {
+    setShowTopCommandPalette(false);
+    setShowLeftCommandList(false);
+  }
+
+  function addCommandFromPalette(type) {
+    if (isRunning) return;
+    if (isMissionMode) {
+      const fillFirstBlank = (list) => {
+        let replaced = false;
+        const next = list.map((c) => {
+          if (replaced) return c;
+          if (isBlankCommand(c)) {
+            replaced = true;
+            return { ...createCommand(type), replacedMissionBlank: true };
+          }
+          if (Array.isArray(c.children) && c.children.length) {
+            const nextChildren = fillFirstBlank(c.children);
+            if (nextChildren !== c.children) {
+              replaced = true;
+              return { ...c, children: nextChildren };
+            }
+          }
+          return c;
+        });
+        return replaced ? next : list;
+      };
+      setCommands((prev) => fillFirstBlank(prev));
+      setCenterResult(null);
+      return;
+    }
+    setCommands((prev) => [...prev, createCommand(type)]);
+  }
+
   function moveCommandUp(index) {
-    if (isRunning || index === 0) return;
+    if (isRunning || index === 0 || isMissionMode) return;
     setCommands((prev) => {
       const next = [...prev];
       [next[index - 1], next[index]] = [next[index], next[index - 1]];
@@ -304,7 +592,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
   }
 
   function moveCommandDown(index) {
-    if (isRunning || index === commands.length - 1) return;
+    if (isRunning || index === commands.length - 1 || isMissionMode) return;
     setCommands((prev) => {
       const next = [...prev];
       [next[index], next[index + 1]] = [next[index + 1], next[index]];
@@ -312,10 +600,29 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     });
   }
 
+  function replaceCommandIdWithBlankRecursive(list, commandId) {
+    return list.map((c) => {
+      if (c.id === commandId) return createBlankCommand();
+      if (c.children?.length) {
+        return { ...c, children: replaceCommandIdWithBlankRecursive(c.children, commandId) };
+      }
+      return c;
+    });
+  }
+
   function removeCommand(commandId) {
     if (isRunning) return;
     // 첫 "이륙" 기본 명령은 삭제 불가
     if (commandId === 1) return;
+    if (isMissionMode) {
+      setCommands((prev) => {
+        const target = findCommandById(prev, commandId);
+        if (!target || isBlankCommand(target) || !target.replacedMissionBlank) return prev;
+        return replaceCommandIdWithBlankRecursive(prev, commandId);
+      });
+      setCenterResult(null);
+      return;
+    }
     const removeRecursively = (list) =>
       list
         .filter((c) => c.id !== commandId)
@@ -395,6 +702,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
 
   function applyDropPayload(payload, target) {
     if (!payload || typeof payload !== "object" || !target) return;
+    if (isMissionMode) return;
     setCommands((prev) => {
       let working = prev;
       let movingCommand = null;
@@ -472,27 +780,8 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     return { x: e?.clientX ?? 0, y: e?.clientY ?? 0 };
   }
 
-  function startPalettePointerDrag(e, type) {
-    if (isRunning) return;
-    if (dragState) return;
-    e.preventDefault();
-    const pt = getClientPoint(e);
-    setDragState({
-      source: "palette",
-      type,
-      amount:
-        usesMoveAmount(type) || usesVerticalAmount(type)
-          ? 1
-          : usesRotationAmount(type)
-            ? 90
-            : null,
-    });
-    setDragCursor({ x: pt.x, y: pt.y });
-    setDropTarget(null);
-  }
-
   function startListPointerDrag(e, commandId) {
-    if (isRunning) return;
+    if (isRunning || isMissionMode) return;
     if (dragState) return;
     e.preventDefault();
     const pt = getClientPoint(e);
@@ -582,16 +871,12 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     };
   }, [dragState, dropIndex, dropTarget]);
 
-  function startPaletteTouchDrag(e, type) {
-    if (typeof window !== "undefined" && "PointerEvent" in window) return;
-    startPalettePointerDrag(e, type);
-  }
-
   function waitWithToken(ms, token) {
+    const scaledMs = Math.max(60, Math.floor(ms / (isFastExecution ? 2 : 1)));
     return new Promise((resolve) => {
       timerRef.current = setTimeout(() => {
         resolve(token === runTokenRef.current);
-      }, ms);
+      }, scaledMs);
     });
   }
 
@@ -642,7 +927,13 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
         if (c.children?.length) return { ...c, children: update(c.children) };
         return c;
       });
-    setCommands((prev) => update(prev));
+    setCommands((prev) => {
+      if (isMissionMode) {
+        const target = findCommandById(prev, commandId);
+        if (target?.missionFixedAmount) return prev;
+      }
+      return update(prev);
+    });
   }
 
   function updateCommandRotation(commandId, degrees) {
@@ -655,7 +946,13 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
         if (c.children?.length) return { ...c, children: update(c.children) };
         return c;
       });
-    setCommands((prev) => update(prev));
+    setCommands((prev) => {
+      if (isMissionMode) {
+        const target = findCommandById(prev, commandId);
+        if (target?.missionFixedAmount) return prev;
+      }
+      return update(prev);
+    });
   }
 
   function updateLoopRepeat(commandId, amount) {
@@ -668,7 +965,13 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
         if (c.children?.length) return { ...c, children: update(c.children) };
         return c;
       });
-    setCommands((prev) => update(prev));
+    setCommands((prev) => {
+      if (isMissionMode) {
+        const target = findCommandById(prev, commandId);
+        if (target?.missionFixedAmount) return prev;
+      }
+      return update(prev);
+    });
   }
 
   function expandCommands(list) {
@@ -678,6 +981,8 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
         const count = Math.max(1, Number.isFinite(cmd.amount) ? cmd.amount : 1);
         const inner = expandCommands(cmd.children ?? []);
         for (let i = 0; i < count; i += 1) expanded.push(...inner);
+      } else if (cmd.type === "빈칸") {
+        // 채워지지 않은 빈칸은 실행 큐에 넣지 않음(이중 방어)
       } else {
         expanded.push(cmd);
       }
@@ -748,8 +1053,32 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     };
   }
 
+  function markMissionStageCompleted(stageNumber) {
+    setCompletedMissionStages((prev) => {
+      if (prev.has(stageNumber)) return prev;
+      const next = new Set(prev);
+      next.add(stageNumber);
+      if (
+        next.size >= missionStageNumbers.length &&
+        !allMissionsCelebrationShownRef.current
+      ) {
+        allMissionsCelebrationShownRef.current = true;
+        if (allMissionsCelebrationTimerRef.current) {
+          clearTimeout(allMissionsCelebrationTimerRef.current);
+        }
+        allMissionsCelebrationTimerRef.current = setTimeout(() => {
+          allMissionsCelebrationTimerRef.current = null;
+          setShowAllMissionsCompletePopup(true);
+        }, 1600);
+      }
+      return next;
+    });
+  }
+
   function runCommands() {
     if (isRunning || commands.length === 0) return;
+    if (commandTreeContainsBlank(commands)) return;
+    setCenterResult(null);
 
     if (timerRef.current) clearTimeout(timerRef.current);
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -760,6 +1089,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     setRotationY(START_ROTATION);
     setIsSuccess(false);
     setIsCrash(false);
+    setShowMissionIntro(false);
     setIsRunning(true);
     setCurrentIndex(0);
 
@@ -803,7 +1133,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
             stage1,
             tempRotation,
             nextRotation,
-            900,
+            Math.max(120, Math.floor(900 / (isFastExecution ? 2 : 1))),
             token,
             (candidatePos) => {
               if (!hitPlacedObstacleAt(candidatePos)) return false;
@@ -817,7 +1147,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
             nextPosition,
             nextRotation,
             nextRotation,
-            1400,
+            Math.max(120, Math.floor(1400 / (isFastExecution ? 2 : 1))),
             token,
             (candidatePos) => {
               if (!hitPlacedObstacleAt(candidatePos)) return false;
@@ -832,7 +1162,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
             nextPosition,
             tempRotation,
             nextRotation,
-            1700,
+            Math.max(120, Math.floor(1700 / (isFastExecution ? 2 : 1))),
             token,
             (candidatePos) => {
               if (!hitPlacedObstacleAt(candidatePos)) return false;
@@ -847,7 +1177,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
             nextPosition,
             tempRotation,
             nextRotation,
-            1840,
+            Math.max(120, Math.floor(1840 / (isFastExecution ? 2 : 1))),
             token,
             (candidatePos) => {
               if (!hitPlacedObstacleAt(candidatePos)) return false;
@@ -862,7 +1192,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
             nextPosition,
             tempRotation,
             nextRotation,
-            1440,
+            Math.max(120, Math.floor(1440 / (isFastExecution ? 2 : 1))),
             token,
             (candidatePos) => {
               if (!hitPlacedObstacleAt(candidatePos)) return false;
@@ -885,8 +1215,8 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
         const landedOnGoal =
           command.type === "착륙" &&
           !nextIsFlying &&
-          Math.abs(nextPosition[0] - activeGoal[0]) < 1 &&
-          Math.abs(nextPosition[2] - activeGoal[2]) < 1;
+          Math.abs(nextPosition[0] - activeGoal[0]) < 0.45 &&
+          Math.abs(nextPosition[2] - activeGoal[2]) < 0.45;
         if (landedOnGoal) {
           stopRotorLoop();
           playSuccessChime();
@@ -894,6 +1224,21 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
           setIsRunning(false);
           setCurrentIndex(-1);
           setCurrentCommandId(null);
+          setCenterResult({ type: "success", message: "성공입니다! 축하합니다!" });
+          markMissionStageCompleted(missionStage);
+          if (crashResetTimerRef.current) clearTimeout(crashResetTimerRef.current);
+          crashResetTimerRef.current = setTimeout(() => {
+            if (isMissionMode) {
+              const availableStages = Object.keys(missionStageConfigs)
+                .map((s) => Number(s))
+                .filter(Number.isFinite)
+                .sort((a, b) => a - b);
+              const next = availableStages.find((s) => s > missionStage) ?? missionStage;
+              setMissionStage(next);
+            } else {
+              resetAll();
+            }
+          }, 1500);
           return;
         }
 
@@ -909,6 +1254,11 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
       setCurrentIndex(-1);
       setCurrentCommandId(null);
       stopRotorLoop();
+      setCenterResult({ type: "error", message: "실패했습니다! 목표물에 도착하지 못했습니다." });
+      if (crashResetTimerRef.current) clearTimeout(crashResetTimerRef.current);
+      crashResetTimerRef.current = setTimeout(() => {
+        resetDroneOnly();
+      }, 1600);
     }
 
     runNext();
@@ -920,9 +1270,35 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
       if (timerRef.current) clearTimeout(timerRef.current);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       if (crashResetTimerRef.current) clearTimeout(crashResetTimerRef.current);
+      if (allMissionsCelebrationTimerRef.current) {
+        clearTimeout(allMissionsCelebrationTimerRef.current);
+      }
       stopRotorLoop();
     };
   }, []);
+
+  useEffect(() => {
+    if (!isMissionMode) {
+      setShowMissionIntro(false);
+      return;
+    }
+    const config = missionStageConfigs[missionStage];
+    if (!config) return;
+    resetDroneOnly();
+    setPlacedItems({
+      obstacles: config.obstacles.map((o, idx) => ({ ...o, id: idx + 1 })),
+      goal: config.goal ?? { x: 4, z: -4 },
+    });
+    setCommands(buildMissionCommandsWithBlank(missionStage));
+    setSelectedPlacementType(null);
+    setCenterResult(null);
+    setShowMissionIntro(true);
+  }, [isMissionMode, missionStage]);
+
+  useEffect(() => {
+    // 미션/편집 모드 진입 시 코딩 UI는 항상 펼침
+    openCodingUI();
+  }, [codingMainMode]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -994,6 +1370,19 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     const textSize = compact ? "text-xs" : "text-sm";
     const inputSize = compact ? "w-8 text-[11px]" : "w-9 text-xs";
     const selectSize = compact ? "w-12 text-[11px]" : "w-14 text-xs";
+    const lockAmountInput = isMissionMode && command.missionFixedAmount;
+    const missionAddedBlock = isMissionMode && !command.missionFixedAmount && !isBlankCommand(command);
+    const amountInputBaseClass = `${inputSize} px-1 py-0.5 rounded border font-semibold`;
+    const amountInputClassName = lockAmountInput
+      ? `${amountInputBaseClass} border-white/40 bg-transparent text-white cursor-not-allowed`
+      : missionAddedBlock
+        ? `${amountInputBaseClass} border-gray-300 bg-white text-black`
+        : `${amountInputBaseClass} text-black`;
+    const rotationSelectClassName = lockAmountInput
+      ? `${selectSize} px-1 py-0.5 rounded border border-white/40 bg-transparent text-white font-semibold cursor-not-allowed`
+      : missionAddedBlock
+        ? `${selectSize} px-1 py-0.5 rounded border border-gray-300 bg-white text-black font-semibold`
+        : `${selectSize} px-1 py-0.5 rounded border text-black font-semibold`;
     return (
       <span className={`pr-5 whitespace-nowrap ${textSize}`}>
         {isLoopType(command.type) ? (
@@ -1021,8 +1410,8 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
               onFocus={(e) => e.target.select()}
               onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
-              className={`${inputSize} px-1 py-0.5 rounded border text-black font-semibold`}
-              disabled={isRunning}
+              className={amountInputClassName}
+              disabled={isRunning || lockAmountInput}
             />
             번 반복
           </>
@@ -1052,8 +1441,8 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
               onFocus={(e) => e.target.select()}
               onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
-              className={`${inputSize} px-1 py-0.5 rounded border text-black font-semibold`}
-              disabled={isRunning}
+              className={amountInputClassName}
+              disabled={isRunning || lockAmountInput}
             />
             칸 이동
           </>
@@ -1082,8 +1471,8 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
               onFocus={(e) => e.target.select()}
               onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
-              className={`${inputSize} px-1 py-0.5 rounded border text-black font-semibold`}
-              disabled={isRunning}
+              className={amountInputClassName}
+              disabled={isRunning || lockAmountInput}
             />
             칸 {command.type}
           </>
@@ -1095,8 +1484,8 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
               onChange={(e) => updateCommandRotation(command.id, Number(e.target.value))}
               onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
-              className={`${selectSize} px-1 py-0.5 rounded border text-black font-semibold`}
-              disabled={isRunning}
+              className={rotationSelectClassName}
+              disabled={isRunning || lockAmountInput}
             >
               <option value={30}>30도</option>
               <option value={60}>60도</option>
@@ -1122,9 +1511,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
           depth > 1 ? "ml-2 mr-0.5" : "ml-2 mr-1"
         }`}
       >
-        <div className="text-[11px] text-violet-700 font-semibold mb-1">
-          반복 내부 명령 (드래그해서 넣기)
-        </div>
+        <div className="text-[11px] text-violet-700 font-semibold mb-1">반복 내부 명령</div>
         <div
           data-loop-drop-id={loopCommand.id}
           className={`min-h-8 rounded-md border-2 border-dashed px-2 py-1 text-xs ${
@@ -1163,10 +1550,14 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
                   <button
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={() => removeCommand(child.id)}
-                    disabled={isRunning}
+                    disabled={isRunning || (isMissionMode && !child.replacedMissionBlank)}
                     className="absolute right-1 top-1 w-4 h-4 text-[9px] bg-red-500 text-white rounded-full disabled:bg-gray-300"
                     aria-label="반복 내부 명령 삭제"
-                    title="명령 삭제"
+                    title={
+                      isMissionMode && child.replacedMissionBlank
+                        ? "빈칸으로 되돌리기"
+                        : "명령 삭제"
+                    }
                   >
                     X
                   </button>
@@ -1197,9 +1588,9 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
         <div className="p-1 sm:p-2 md:p-4 bg-white border-b shrink-0 select-none">
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setShowTopCommandPalette(false)}
+              onClick={closeCodingUI}
               className="px-2 py-1 rounded-md bg-blue-600 text-white text-xs font-semibold shrink-0"
-              title="위 명령어 메뉴 접기"
+              title="코딩 UI 닫기"
             >
               ▴
             </button>
@@ -1211,13 +1602,12 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
           {commandPalette.map((item) => (
             <button
               key={item.type}
-              onPointerDown={(e) => startPalettePointerDrag(e, item.type)}
-              onTouchStart={(e) => startPaletteTouchDrag(e, item.type)}
+              onClick={() => addCommandFromPalette(item.type)}
               className={`px-1.5 sm:px-3 py-0.5 sm:py-1.5 md:px-4 md:py-2 text-[10px] sm:text-sm md:text-base ${item.colorClass} rounded-md sm:rounded-lg shrink-0 ${
-                isRunning ? "opacity-60 cursor-not-allowed" : "cursor-grab active:cursor-grabbing"
+                isRunning ? "opacity-60 cursor-not-allowed" : "cursor-pointer active:scale-[0.98]"
               }`}
               disabled={isRunning}
-              title="드래그해서 명령 목록에 추가"
+              title="터치하면 명령 목록에 바로 추가"
             >
               {usesMoveAmount(item.type)
                 ? `${item.type.split(" ")[0]} 1칸 이동`
@@ -1232,10 +1622,66 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
         </div>
       )}
 
-      {isSuccess && (
+      {isMissionMode && showMissionIntro && (
+        <div className="pointer-events-none absolute left-1/2 top-[31%] z-[120] -translate-x-1/2 px-3">
+          <div className="max-w-[90vw] rounded-xl bg-indigo-600/90 px-4 py-2 text-center text-sm font-semibold text-white shadow-lg sm:text-base">
+            알맞은 명령블럭을 넣어 드론을 목표물에 착륙시키세요
+          </div>
+        </div>
+      )}
+
+      {centerResult && (
         <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 top-[24%] z-[120]">
-          <div className="px-6 py-3 rounded-2xl bg-emerald-600/95 text-white text-2xl sm:text-3xl font-extrabold shadow-2xl whitespace-nowrap">
-            성공입니다! 축하합니다!
+          <div
+            className={`px-6 py-3 rounded-2xl text-white text-2xl sm:text-3xl font-extrabold shadow-2xl whitespace-nowrap ${
+              centerResult.type === "success" ? "bg-emerald-600/95" : "bg-rose-600/95"
+            }`}
+          >
+            {centerResult.message}
+          </div>
+        </div>
+      )}
+
+      {showAllMissionsCompletePopup && (
+        <div className="absolute inset-0 z-[140] flex items-center justify-center bg-black/45 px-4">
+          <div className="w-full max-w-md rounded-2xl bg-white p-5 sm:p-6 shadow-2xl text-center">
+            <p className="text-base sm:text-lg font-bold text-slate-800 leading-relaxed">
+              축하합니다! 이제 편집모드를 선택하여 미션을 직접 만들어 보세요
+            </p>
+            <button
+              type="button"
+              onClick={() => setShowAllMissionsCompletePopup(false)}
+              className="mt-4 rounded-lg bg-indigo-600 px-5 py-2 text-sm font-semibold text-white"
+            >
+              확인
+            </button>
+          </div>
+        </div>
+      )}
+
+      {isMissionMode && (
+        <div className="absolute left-1/2 bottom-3 z-[125] flex -translate-x-1/2 flex-col items-center gap-1.5 px-2 pointer-events-none">
+          <div className="pointer-events-auto flex items-center gap-1.5 rounded-2xl border border-indigo-200 bg-white/95 px-2 py-1.5 shadow-lg backdrop-blur">
+            <span className="text-[10px] font-semibold text-indigo-800 shrink-0">단계</span>
+            <div className="flex flex-wrap justify-center gap-1">
+              {missionStageNumbers.map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => setMissionStage(n)}
+                  disabled={isRunning}
+                  className={`min-w-[1.75rem] rounded-md px-1.5 py-0.5 text-xs font-bold transition ${
+                    missionStage === n
+                      ? "bg-blue-600 text-white"
+                      : completedMissionStages.has(n)
+                        ? "bg-green-600 text-white"
+                        : "bg-gray-200 text-gray-800 hover:bg-gray-300"
+                  } ${isRunning ? "cursor-not-allowed opacity-60" : ""}`}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       )}
@@ -1252,24 +1698,24 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
             <div className="flex items-center gap-1.5">
               {!showTopCommandPalette && (
                 <button
-                  onClick={() => setShowTopCommandPalette(true)}
+                  onClick={openCodingUI}
                   className="w-7 h-7 bg-blue-600 text-white rounded-md text-sm font-bold leading-none flex items-center justify-center"
-                  title="위 명령어 메뉴 펼치기"
+                  title="코딩 UI 열기"
                 >
                   ▾
                 </button>
               )}
               <button
-                onClick={() => setShowLeftCommandList(false)}
+                onClick={closeCodingUI}
                 className="px-2 py-1 bg-blue-600 text-white rounded-md text-xs font-semibold"
-                title="왼쪽 코딩메뉴 접기"
+                title="코딩 UI 닫기"
               >
                 ◂
               </button>
               <button
                 onClick={runCommands}
                 className="px-2.5 py-1.5 bg-indigo-600 text-white rounded-md text-xs font-semibold disabled:bg-gray-300"
-                disabled={isRunning || commands.length === 0}
+                disabled={isRunning || commands.length === 0 || commandTreeContainsBlank(commands)}
               >
                 실행
               </button>
@@ -1297,7 +1743,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
                     : "border-gray-300 text-gray-500"
                 }`}
               >
-                여기에 드래그해서 명령 추가
+                위 명령 블럭을 터치해 추가
               </div>
             ) : (
               <div className="flex flex-col gap-1">
@@ -1316,8 +1762,12 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
                   <div
                     onPointerDown={(e) => startListPointerDrag(e, command.id)}
                     className={`relative flex items-center justify-between gap-2 px-3 py-2 rounded-lg ${
-                      isRunning ? "cursor-default" : "cursor-grab active:cursor-grabbing"
-                    } ${commandColorByType[command.type] ?? "bg-blue-100 text-blue-800"} ${
+                      isRunning || isMissionMode ? "cursor-default" : "cursor-grab active:cursor-grabbing"
+                    } ${
+                      isBlankCommand(command)
+                        ? "bg-gray-100 text-gray-500 border-2 border-dashed border-gray-400"
+                        : commandColorByType[command.type] ?? "bg-blue-100 text-blue-800"
+                    } ${
                     dropIndex === index ? "ring-2 ring-blue-400" : ""
                   } ${
                     currentCommandId === command.id
@@ -1332,10 +1782,20 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
                     <button
                       onPointerDown={(e) => e.stopPropagation()}
                       onClick={() => removeCommand(command.id)}
-                      disabled={isRunning}
+                      disabled={
+                        isRunning ||
+                        command.id === 1 ||
+                        (isMissionMode && !command.replacedMissionBlank)
+                      }
                       className="absolute right-1 top-1 w-5 h-5 text-[10px] bg-red-500 text-white rounded-full disabled:bg-gray-300"
                       aria-label="명령 삭제"
-                      title={command.id === 1 ? "기본 이륙 명령은 삭제할 수 없습니다." : "명령 삭제"}
+                      title={
+                        command.id === 1
+                          ? "기본 이륙 명령은 삭제할 수 없습니다."
+                          : isMissionMode && command.replacedMissionBlank
+                            ? "빈칸으로 되돌리기"
+                            : "명령 삭제"
+                      }
                     >
                       X
                     </button>
@@ -1353,36 +1813,26 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
               </div>
             )}
           </div>
-          <div className="absolute right-3 bottom-3">
+          <div className="absolute right-3 bottom-3 flex items-center gap-2">
+            <button
+              onClick={() => setIsFastExecution((v) => !v)}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold ${
+                isFastExecution ? "bg-amber-600 text-white" : "bg-gray-200 text-gray-700"
+              }`}
+              title="코딩 실행 속도 2배 토글"
+            >
+              {isFastExecution ? "2x ON" : "2x"}
+            </button>
             <button
               onClick={clearCommands}
               className="px-3 py-1.5 bg-violet-600 text-white rounded-md text-xs font-semibold disabled:bg-gray-300"
-              disabled={isRunning || commands.length <= 1}
+              disabled={isRunning || commands.length <= 1 || isMissionMode}
             >
               모두 삭제
             </button>
           </div>
         </div>
-        ) : (
-          <div className="w-[44px] shrink-0 bg-white border-r flex flex-col items-center gap-2 pt-3">
-            {!showTopCommandPalette && (
-              <button
-                onClick={() => setShowTopCommandPalette(true)}
-                className="w-7 h-7 bg-blue-600 text-white rounded-md text-sm font-bold leading-none flex items-center justify-center"
-                title="위 명령어 메뉴 펼치기"
-              >
-                ▾
-              </button>
-            )}
-            <button
-              onClick={() => setShowLeftCommandList(true)}
-              className="w-7 h-7 bg-blue-600 text-white rounded-md text-sm font-bold leading-none flex items-center justify-center"
-              title="왼쪽 코딩메뉴 펼치기"
-            >
-              ▸
-            </button>
-          </div>
-        )}
+        ) : null}
 
         <div className="relative flex-1 min-w-0">
           <CodingScene
@@ -1401,6 +1851,21 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
             cameraResetToken={cameraResetToken}
             isCrash={isCrash}
           />
+
+          {!showLeftCommandList && (
+            <div
+              data-ui-block="true"
+              className="absolute left-2 top-2 z-[170] flex flex-col gap-2"
+            >
+              <button
+                onClick={openCodingUI}
+                className="w-16 h-10 rounded-lg bg-blue-600 text-white text-[11px] font-semibold leading-tight shadow"
+                title="코딩 UI 열기"
+              >
+                ▸ 코딩
+              </button>
+            </div>
+          )}
 
           <div
             data-ui-block="true"
@@ -1422,16 +1887,35 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
                 : undefined,
             }}
           >
+            <div className="mb-2 space-y-1">
+              <button
+                onClick={() => setCodingMainMode("mission")}
+                className={`w-full rounded-md px-1.5 py-1 text-[10px] font-semibold ${
+                  isMissionMode ? "bg-indigo-600 text-white" : "bg-gray-200 text-gray-700"
+                }`}
+              >
+                미션
+              </button>
+              <button
+                onClick={() => setCodingMainMode("edit")}
+                className={`w-full rounded-md px-1.5 py-1 text-[10px] font-semibold ${
+                  !isMissionMode ? "bg-indigo-600 text-white" : "bg-gray-200 text-gray-700"
+                }`}
+              >
+                편집 모드
+              </button>
+            </div>
             <div className="relative mb-2">
               <button
                 onClick={() => setShowObjectMenu((v) => !v)}
-                className="mx-auto block w-6 h-6 rounded bg-blue-600 text-white text-[11px] font-bold leading-none"
+                className="mx-auto block w-6 h-6 rounded bg-blue-600 text-white text-[11px] font-bold leading-none disabled:bg-gray-300"
                 title="물체 메뉴 접기/펼치기"
+                disabled={isMissionMode}
               >
                 {showObjectMenu ? "▴" : "▾"}
               </button>
             </div>
-            {showObjectMenu && (
+            {showObjectMenu && !isMissionMode && (
               <>
             <div className="flex flex-col items-center gap-2">
               <button
