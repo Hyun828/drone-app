@@ -180,6 +180,8 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
       },
       6: {
         allowFreeCommandInsert: true,
+        // 6단계는 기본 명령을 이륙/착륙만 두고,
+        // 그 사이는 개수 제한 없이 자유롭게 채우는 단계.
         obstacles: [
           { x: 1, z: 0, level: 0, color: "#f87171", edgeColor: darkenHex("#f87171") },
           { x: 2, z: -1, level: 0, color: "#f59e0b", edgeColor: darkenHex("#f59e0b") },
