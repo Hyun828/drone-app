@@ -278,7 +278,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
       10: {
         allowFreeCommandInsert: true,
         // 9단계 맵 복사 + 8단계처럼 이륙/착륙 사이 자유 명령 추가
-        goal: { x: 2, z: -2 },
+        goal: { x: 4, z: -3 },
         obstacles: [
           { x: -1, z: -1, level: 0, color: "#f472b6", edgeColor: darkenHex("#f472b6") },
           { x: -1, z: -1, level: 1, color: "#f472b6", edgeColor: darkenHex("#f472b6") },
