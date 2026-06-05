@@ -2477,9 +2477,15 @@ function CodingDrone({ position, rotationY, spinActive }) {
   );
 }
 
-function CodingCamera({ targetPosition, rotationY, zoomScale, lookOffset }) {
+function CodingCamera({
+  targetPosition,
+  rotationY,
+  zoomScale,
+  lookOffset,
+  yawOffset = 0,
+  pitchOffset = 0,
+}) {
   useFrame(({ camera }) => {
-    // Top-down edit camera with pinch-zoom and two-finger pan support.
     const baseHeight = 7.1;
     const baseBackOffset = 4.2;
     const safeZoom = Math.max(0.6, Math.min(1.9, zoomScale ?? 1));
@@ -2487,14 +2493,30 @@ function CodingCamera({ targetPosition, rotationY, zoomScale, lookOffset }) {
     const backOffset = baseBackOffset * safeZoom;
     const targetX = targetPosition[0] + (lookOffset?.[0] ?? 0);
     const targetZ = targetPosition[2] + (lookOffset?.[2] ?? 0);
+    const lookY = targetPosition[1] + 0.9;
     const forwardX = -Math.sin(rotationY);
     const forwardZ = -Math.cos(rotationY);
-    camera.position.set(
-      targetX - forwardX * backOffset,
-      targetPosition[1] + height,
-      targetZ - forwardZ * backOffset
-    );
-    camera.lookAt(targetX, targetPosition[1] + 0.9, targetZ);
+
+    let ox = -forwardX * backOffset;
+    let oy = height - 0.9;
+    let oz = -forwardZ * backOffset;
+
+    const cosYaw = Math.cos(yawOffset);
+    const sinYaw = Math.sin(yawOffset);
+    let rx = ox * cosYaw - oz * sinYaw;
+    let rz = ox * sinYaw + oz * cosYaw;
+    ox = rx;
+    oz = rz;
+
+    const cosPitch = Math.cos(pitchOffset);
+    const sinPitch = Math.sin(pitchOffset);
+    const py = oy * cosPitch - oz * sinPitch;
+    const pz = oy * sinPitch + oz * cosPitch;
+    oy = py;
+    oz = pz;
+
+    camera.position.set(targetX + ox, lookY + oy, targetZ + oz);
+    camera.lookAt(targetX, lookY, targetZ);
   });
 
   return null;
@@ -2519,11 +2541,25 @@ function CodingScene({
   const gridCellSize = 1;
   const gridHalfSize = 7;
   const visualPlaneSize = 40;
+  const sceneContainerRef = useRef(null);
   const [cameraZoomScale, setCameraZoomScale] = useState(1);
   const [cameraLookOffset, setCameraLookOffset] = useState([0, 0, 0]);
+  const [cameraYawOffset, setCameraYawOffset] = useState(0);
+  const [cameraPitchOffset, setCameraPitchOffset] = useState(0);
+  const isCameraDraggingRef = useRef(false);
+  const cameraDragPointerIdRef = useRef(null);
+  const lastCameraDragRef = useRef({ x: 0, y: 0 });
+  const singleTouchPanRef = useRef(false);
+  const singleTouchIdRef = useRef(null);
   const pinchActiveRef = useRef(false);
   const pinchLastDistRef = useRef(0);
   const pinchLastMidRef = useRef({ x: 0, y: 0 });
+
+  const applyCameraOrbitDelta = useCallback((deltaX, deltaY) => {
+    setCameraYawOffset((prev) => prev - deltaX * 0.006);
+    setCameraPitchOffset((prev) => clamp(prev - deltaY * 0.004, -0.85, 0.35));
+  }, []);
+
   const getTouchDistance = (t1, t2) => {
     const dx = t1.clientX - t2.clientX;
     const dy = t1.clientY - t2.clientY;
@@ -2549,53 +2585,144 @@ function CodingScene({
   useEffect(() => {
     setCameraZoomScale(1);
     setCameraLookOffset([0, 0, 0]);
+    setCameraYawOffset(0);
+    setCameraPitchOffset(0);
   }, [cameraResetToken]);
+
+  useEffect(() => {
+    const el = sceneContainerRef.current;
+    if (!el) return;
+
+    const canDragCamera = (button) =>
+      button === 2 || (!placementType && button === 0);
+
+    const handlePointerDown = (e) => {
+      if (!canDragCamera(e.button)) return;
+      isCameraDraggingRef.current = true;
+      cameraDragPointerIdRef.current = e.pointerId;
+      lastCameraDragRef.current = { x: e.clientX, y: e.clientY };
+      try {
+        el.setPointerCapture(e.pointerId);
+      } catch {}
+    };
+
+    const handlePointerMove = (e) => {
+      if (!isCameraDraggingRef.current) return;
+      if (cameraDragPointerIdRef.current !== e.pointerId) return;
+      const dx = e.clientX - lastCameraDragRef.current.x;
+      const dy = e.clientY - lastCameraDragRef.current.y;
+      lastCameraDragRef.current = { x: e.clientX, y: e.clientY };
+      applyCameraOrbitDelta(dx, dy);
+    };
+
+    const stopCameraDrag = (e) => {
+      if (cameraDragPointerIdRef.current !== e.pointerId) return;
+      isCameraDraggingRef.current = false;
+      cameraDragPointerIdRef.current = null;
+      try {
+        el.releasePointerCapture(e.pointerId);
+      } catch {}
+    };
+
+    const handleWheel = (e) => {
+      e.preventDefault();
+      const factor = e.deltaY > 0 ? 1.08 : 0.92;
+      setCameraZoomScale((prev) => clamp(prev * factor, 0.65, 1.9));
+    };
+
+    const handleContextMenu = (e) => {
+      if (isCameraDraggingRef.current) e.preventDefault();
+    };
+
+    el.addEventListener("pointerdown", handlePointerDown);
+    el.addEventListener("pointermove", handlePointerMove);
+    el.addEventListener("pointerup", stopCameraDrag);
+    el.addEventListener("pointercancel", stopCameraDrag);
+    el.addEventListener("wheel", handleWheel, { passive: false });
+    el.addEventListener("contextmenu", handleContextMenu);
+
+    return () => {
+      el.removeEventListener("pointerdown", handlePointerDown);
+      el.removeEventListener("pointermove", handlePointerMove);
+      el.removeEventListener("pointerup", stopCameraDrag);
+      el.removeEventListener("pointercancel", stopCameraDrag);
+      el.removeEventListener("wheel", handleWheel);
+      el.removeEventListener("contextmenu", handleContextMenu);
+    };
+  }, [placementType, applyCameraOrbitDelta]);
 
   return (
     <div
-      className="relative w-full h-full min-h-[320px] overflow-hidden"
+      ref={sceneContainerRef}
+      className="relative w-full h-full min-h-[320px] overflow-hidden cursor-grab active:cursor-grabbing"
       style={{ touchAction: "none", overscrollBehavior: "none" }}
       onTouchStart={(e) => {
         if (e.touches.length >= 2) {
           const t1 = e.touches[0];
           const t2 = e.touches[1];
+          singleTouchPanRef.current = false;
+          singleTouchIdRef.current = null;
           pinchActiveRef.current = true;
           pinchLastDistRef.current = getTouchDistance(t1, t2);
           pinchLastMidRef.current = getTouchMidpoint(t1, t2);
+          return;
+        }
+        if (!placementType && e.touches.length === 1) {
+          singleTouchPanRef.current = true;
+          singleTouchIdRef.current = e.touches[0].identifier;
+          lastCameraDragRef.current = {
+            x: e.touches[0].clientX,
+            y: e.touches[0].clientY,
+          };
         }
       }}
       onTouchMove={(e) => {
-        if (!pinchActiveRef.current || e.touches.length < 2) return;
+        if (pinchActiveRef.current && e.touches.length >= 2) {
+          e.preventDefault();
+          const t1 = e.touches[0];
+          const t2 = e.touches[1];
+          const dist = getTouchDistance(t1, t2);
+          const mid = getTouchMidpoint(t1, t2);
+          const lastDist = pinchLastDistRef.current || dist;
+          const lastMid = pinchLastMidRef.current || mid;
+
+          const zoomFactor = lastDist / Math.max(1, dist);
+          setCameraZoomScale((prev) => Math.max(0.65, Math.min(1.9, prev * zoomFactor)));
+
+          const dx = mid.x - lastMid.x;
+          const dy = mid.y - lastMid.y;
+          const panSpeed = 0.018;
+          setCameraLookOffset((prev) => [
+            Math.max(-12, Math.min(12, prev[0] - dx * panSpeed)),
+            0,
+            Math.max(-12, Math.min(12, prev[2] + dy * panSpeed)),
+          ]);
+
+          pinchLastDistRef.current = dist;
+          pinchLastMidRef.current = mid;
+          return;
+        }
+
+        if (!singleTouchPanRef.current || placementType || e.touches.length !== 1) return;
+        const touch = e.touches[0];
+        if (touch.identifier !== singleTouchIdRef.current) return;
         e.preventDefault();
-        const t1 = e.touches[0];
-        const t2 = e.touches[1];
-        const dist = getTouchDistance(t1, t2);
-        const mid = getTouchMidpoint(t1, t2);
-        const lastDist = pinchLastDistRef.current || dist;
-        const lastMid = pinchLastMidRef.current || mid;
-
-        // Pinch: distance up -> zoom in (closer), distance down -> zoom out.
-        const zoomFactor = lastDist / Math.max(1, dist);
-        setCameraZoomScale((prev) => Math.max(0.65, Math.min(1.9, prev * zoomFactor)));
-
-        // Two-finger drag: pan camera target on XZ plane.
-        const dx = mid.x - lastMid.x;
-        const dy = mid.y - lastMid.y;
-        const panSpeed = 0.018;
-        setCameraLookOffset((prev) => [
-          Math.max(-12, Math.min(12, prev[0] - dx * panSpeed)),
-          0,
-          Math.max(-12, Math.min(12, prev[2] + dy * panSpeed)),
-        ]);
-
-        pinchLastDistRef.current = dist;
-        pinchLastMidRef.current = mid;
+        const dx = touch.clientX - lastCameraDragRef.current.x;
+        const dy = touch.clientY - lastCameraDragRef.current.y;
+        lastCameraDragRef.current = { x: touch.clientX, y: touch.clientY };
+        applyCameraOrbitDelta(dx, dy);
       }}
       onTouchEnd={(e) => {
         if (e.touches.length < 2) pinchActiveRef.current = false;
+        if (e.touches.length === 0) {
+          singleTouchPanRef.current = false;
+          singleTouchIdRef.current = null;
+        }
       }}
       onTouchCancel={() => {
         pinchActiveRef.current = false;
+        singleTouchPanRef.current = false;
+        singleTouchIdRef.current = null;
       }}
     >
       <Canvas
@@ -2724,6 +2851,8 @@ function CodingScene({
           rotationY={rotationY}
           zoomScale={cameraZoomScale}
           lookOffset={cameraLookOffset}
+          yawOffset={cameraYawOffset}
+          pitchOffset={cameraPitchOffset}
         />
       </Canvas>
     </div>

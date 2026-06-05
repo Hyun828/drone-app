@@ -1293,6 +1293,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     setSelectedPlacementType(null);
     setCenterResult(null);
     setShowMissionIntro(true);
+    setCameraResetToken((v) => v + 1);
   }, [isMissionMode, missionStage]);
 
   useEffect(() => {
