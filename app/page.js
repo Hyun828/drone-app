@@ -2556,8 +2556,9 @@ function CodingScene({
   const pinchLastMidRef = useRef({ x: 0, y: 0 });
 
   const applyCameraOrbitDelta = useCallback((deltaX, deltaY) => {
-    setCameraYawOffset((prev) => prev - deltaX * 0.006);
-    setCameraPitchOffset((prev) => clamp(prev - deltaY * 0.004, -0.85, 0.35));
+    // Sensitivity tuned to be easier to fine-control.
+    setCameraYawOffset((prev) => prev - deltaX * 0.0025);
+    setCameraPitchOffset((prev) => clamp(prev - deltaY * 0.0018, -0.85, 0.35));
   }, []);
 
   const getTouchDistance = (t1, t2) => {
