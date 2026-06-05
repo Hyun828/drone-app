@@ -182,15 +182,20 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
         allowFreeCommandInsert: true,
         // 6단계는 기본 명령을 이륙/착륙만 두고,
         // 그 사이는 개수 제한 없이 자유롭게 채우는 단계.
+        goal: { x: 6, z: -6 },
         obstacles: [
           { x: 1, z: 0, level: 0, color: "#f87171", edgeColor: darkenHex("#f87171") },
           { x: 2, z: -1, level: 0, color: "#f59e0b", edgeColor: darkenHex("#f59e0b") },
           { x: 3, z: -2, level: 0, color: "#a78bfa", edgeColor: darkenHex("#a78bfa") },
           { x: 4, z: -3, level: 0, color: "#60a5fa", edgeColor: darkenHex("#60a5fa") },
+          { x: 5, z: -4, level: 0, color: "#f87171", edgeColor: darkenHex("#f87171") },
+          { x: 6, z: -5, level: 0, color: "#f59e0b", edgeColor: darkenHex("#f59e0b") },
           { x: 0, z: -2, level: 0, color: "#f87171", edgeColor: darkenHex("#f87171") },
           { x: 1, z: -3, level: 0, color: "#f59e0b", edgeColor: darkenHex("#f59e0b") },
           { x: 2, z: -4, level: 0, color: "#a78bfa", edgeColor: darkenHex("#a78bfa") },
           { x: 3, z: -5, level: 0, color: "#60a5fa", edgeColor: darkenHex("#60a5fa") },
+          { x: 4, z: -6, level: 0, color: "#a78bfa", edgeColor: darkenHex("#a78bfa") },
+          { x: 5, z: -7, level: 0, color: "#60a5fa", edgeColor: darkenHex("#60a5fa") },
         ],
         commands: [
           { type: "이륙" },
