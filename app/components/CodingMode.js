@@ -50,6 +50,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
   const [missionStage, setMissionStage] = useState(1);
   const [completedMissionStages, setCompletedMissionStages] = useState(() => new Set());
   const [showMissionIntro, setShowMissionIntro] = useState(false);
+  const [showEditIntro, setShowEditIntro] = useState(false);
   const [showAllMissionsCompletePopup, setShowAllMissionsCompletePopup] = useState(false);
   const [showObstacleColorPicker, setShowObstacleColorPicker] = useState(false);
   const [isFastExecution, setIsFastExecution] = useState(false);
@@ -73,6 +74,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
   const nextCommandIdRef = useRef(2);
   const allMissionsCelebrationShownRef = useRef(false);
   const allMissionsCelebrationTimerRef = useRef(null);
+  const editIntroTimerRef = useRef(null);
   const listContainerRef = useRef(null);
 
   const commandPalette = useMemo(
@@ -1342,6 +1344,9 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
       if (allMissionsCelebrationTimerRef.current) {
         clearTimeout(allMissionsCelebrationTimerRef.current);
       }
+      if (editIntroTimerRef.current) {
+        clearTimeout(editIntroTimerRef.current);
+      }
       stopRotorLoop();
     };
   }, []);
@@ -1368,6 +1373,19 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
   useEffect(() => {
     // 미션/편집 모드 진입 시 코딩 UI는 항상 펼침
     openCodingUI();
+    if (editIntroTimerRef.current) {
+      clearTimeout(editIntroTimerRef.current);
+      editIntroTimerRef.current = null;
+    }
+    if (codingMainMode === "edit") {
+      setShowEditIntro(true);
+      editIntroTimerRef.current = setTimeout(() => {
+        editIntroTimerRef.current = null;
+        setShowEditIntro(false);
+      }, 3000);
+    } else {
+      setShowEditIntro(false);
+    }
   }, [codingMainMode]);
 
   useEffect(() => {
@@ -1696,6 +1714,14 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
         <div className="pointer-events-none absolute left-1/2 top-[31%] z-[120] -translate-x-1/2 px-3">
           <div className="max-w-[90vw] rounded-xl bg-indigo-600/90 px-4 py-2 text-center text-sm font-semibold text-white shadow-lg sm:text-base">
             알맞은 명령블럭을 넣어 드론을 목표물에 착륙시키세요
+          </div>
+        </div>
+      )}
+
+      {!isMissionMode && showEditIntro && (
+        <div className="pointer-events-none absolute left-1/2 top-[31%] z-[120] -translate-x-1/2 px-3">
+          <div className="max-w-[90vw] rounded-xl bg-indigo-600/90 px-4 py-2 text-center text-sm font-semibold text-white shadow-lg sm:text-base">
+            장애물과 목표를 수정해서 나만의 미션을 만들어 보세요
           </div>
         </div>
       )}
