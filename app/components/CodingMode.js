@@ -624,8 +624,19 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     if (isRunning) return;
     // 첫 "이륙" 기본 명령은 삭제 불가
     if (commandId === 1) return;
+    const removeRecursively = (list) =>
+      list
+        .filter((c) => c.id !== commandId)
+        .map((c) =>
+          c.children?.length ? { ...c, children: removeRecursively(c.children) } : c
+        );
     if (isMissionMode) {
       setCommands((prev) => {
+        const config = missionStageConfigs[missionStage];
+        if (config?.allowFreeCommandInsert) {
+          // 자유 추가 단계(예: 6단계)는 삭제 시 빈칸 복구 대신 완전 삭제.
+          return removeRecursively(prev);
+        }
         const target = findCommandById(prev, commandId);
         if (!target || isBlankCommand(target) || !target.replacedMissionBlank) return prev;
         return replaceCommandIdWithBlankRecursive(prev, commandId);
@@ -633,12 +644,6 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
       setCenterResult(null);
       return;
     }
-    const removeRecursively = (list) =>
-      list
-        .filter((c) => c.id !== commandId)
-        .map((c) =>
-          c.children?.length ? { ...c, children: removeRecursively(c.children) } : c
-        );
     setCommands((prev) => removeRecursively(prev));
   }
 
