@@ -2549,16 +2549,17 @@ function CodingScene({
   const isCameraDraggingRef = useRef(false);
   const cameraDragPointerIdRef = useRef(null);
   const lastCameraDragRef = useRef({ x: 0, y: 0 });
-  const singleTouchPanRef = useRef(false);
-  const singleTouchIdRef = useRef(null);
   const pinchActiveRef = useRef(false);
   const pinchLastDistRef = useRef(0);
   const pinchLastMidRef = useRef({ x: 0, y: 0 });
 
-  const applyCameraOrbitDelta = useCallback((deltaX, deltaY) => {
-    // Sensitivity tuned to be easier to fine-control.
-    setCameraYawOffset((prev) => prev - deltaX * 0.0025);
-    setCameraPitchOffset((prev) => clamp(prev - deltaY * 0.0018, -0.85, 0.35));
+  const applyCameraOrbitDelta = useCallback((deltaX, deltaY, pointerType = "mouse") => {
+    // Orbit around the drone look-at point (not the touch/cursor screen position).
+    // Touch uses inverted drag so the scene follows the finger like grabbing a map.
+    const dragX = pointerType === "touch" ? -deltaX : deltaX;
+    const dragY = pointerType === "touch" ? -deltaY : deltaY;
+    setCameraYawOffset((prev) => prev - dragX * 0.0025);
+    setCameraPitchOffset((prev) => clamp(prev - dragY * 0.0018, -0.85, 0.35));
   }, []);
 
   const getTouchDistance = (t1, t2) => {
@@ -2599,6 +2600,7 @@ function CodingScene({
 
     const handlePointerDown = (e) => {
       if (!canDragCamera(e.button)) return;
+      if (pinchActiveRef.current) return;
       isCameraDraggingRef.current = true;
       cameraDragPointerIdRef.current = e.pointerId;
       lastCameraDragRef.current = { x: e.clientX, y: e.clientY };
@@ -2613,7 +2615,7 @@ function CodingScene({
       const dx = e.clientX - lastCameraDragRef.current.x;
       const dy = e.clientY - lastCameraDragRef.current.y;
       lastCameraDragRef.current = { x: e.clientX, y: e.clientY };
-      applyCameraOrbitDelta(dx, dy);
+      applyCameraOrbitDelta(dx, dy, e.pointerType);
     };
 
     const stopCameraDrag = (e) => {
@@ -2661,20 +2663,11 @@ function CodingScene({
         if (e.touches.length >= 2) {
           const t1 = e.touches[0];
           const t2 = e.touches[1];
-          singleTouchPanRef.current = false;
-          singleTouchIdRef.current = null;
+          isCameraDraggingRef.current = false;
+          cameraDragPointerIdRef.current = null;
           pinchActiveRef.current = true;
           pinchLastDistRef.current = getTouchDistance(t1, t2);
           pinchLastMidRef.current = getTouchMidpoint(t1, t2);
-          return;
-        }
-        if (!placementType && e.touches.length === 1) {
-          singleTouchPanRef.current = true;
-          singleTouchIdRef.current = e.touches[0].identifier;
-          lastCameraDragRef.current = {
-            x: e.touches[0].clientX,
-            y: e.touches[0].clientY,
-          };
         }
       }}
       onTouchMove={(e) => {
@@ -2704,26 +2697,12 @@ function CodingScene({
           return;
         }
 
-        if (!singleTouchPanRef.current || placementType || e.touches.length !== 1) return;
-        const touch = e.touches[0];
-        if (touch.identifier !== singleTouchIdRef.current) return;
-        e.preventDefault();
-        const dx = touch.clientX - lastCameraDragRef.current.x;
-        const dy = touch.clientY - lastCameraDragRef.current.y;
-        lastCameraDragRef.current = { x: touch.clientX, y: touch.clientY };
-        applyCameraOrbitDelta(dx, dy);
       }}
       onTouchEnd={(e) => {
         if (e.touches.length < 2) pinchActiveRef.current = false;
-        if (e.touches.length === 0) {
-          singleTouchPanRef.current = false;
-          singleTouchIdRef.current = null;
-        }
       }}
       onTouchCancel={() => {
         pinchActiveRef.current = false;
-        singleTouchPanRef.current = false;
-        singleTouchIdRef.current = null;
       }}
     >
       <Canvas
