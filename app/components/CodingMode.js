@@ -162,25 +162,6 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
       },
       5: {
         obstacles: [
-          { x: 2, z: -1, level: 0, color: "#f472b6", edgeColor: darkenHex("#f472b6") },
-          { x: 3, z: -2, level: 0, color: "#a78bfa", edgeColor: darkenHex("#a78bfa") },
-          { x: 4, z: -3, level: 0, color: "#60a5fa", edgeColor: darkenHex("#60a5fa") },
-        ],
-        commands: [
-          { type: "이륙" },
-          {
-            type: "반복",
-            amount: 4,
-            children: [
-              { type: "앞으로 이동", amount: 1 },
-              { type: "빈칸" },
-            ],
-          },
-          { type: "착륙" },
-        ],
-      },
-      6: {
-        obstacles: [
           // 기존 6단계: 계단형 배치
           { x: 1, z: 0, level: 0, color: "#f87171", edgeColor: darkenHex("#f87171") },
           { x: 2, z: -1, level: 0, color: "#f59e0b", edgeColor: darkenHex("#f59e0b") },
@@ -193,11 +174,24 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
         ],
         commands: [
           { type: "이륙" },
-          {
-            type: "반복",
-            amount: 4,
-            children: [{ type: "빈칸" }, { type: "빈칸" }],
-          },
+          { type: "반복", amount: 4, children: [{ type: "빈칸" }, { type: "빈칸" }] },
+          { type: "착륙" },
+        ],
+      },
+      6: {
+        allowFreeCommandInsert: true,
+        obstacles: [
+          { x: 1, z: 0, level: 0, color: "#f87171", edgeColor: darkenHex("#f87171") },
+          { x: 2, z: -1, level: 0, color: "#f59e0b", edgeColor: darkenHex("#f59e0b") },
+          { x: 3, z: -2, level: 0, color: "#a78bfa", edgeColor: darkenHex("#a78bfa") },
+          { x: 4, z: -3, level: 0, color: "#60a5fa", edgeColor: darkenHex("#60a5fa") },
+          { x: 0, z: -2, level: 0, color: "#f87171", edgeColor: darkenHex("#f87171") },
+          { x: 1, z: -3, level: 0, color: "#f59e0b", edgeColor: darkenHex("#f59e0b") },
+          { x: 2, z: -4, level: 0, color: "#a78bfa", edgeColor: darkenHex("#a78bfa") },
+          { x: 3, z: -5, level: 0, color: "#60a5fa", edgeColor: darkenHex("#60a5fa") },
+        ],
+        commands: [
+          { type: "이륙" },
           { type: "착륙" },
         ],
       },
@@ -556,6 +550,20 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
   function addCommandFromPalette(type) {
     if (isRunning) return;
     if (isMissionMode) {
+      const config = missionStageConfigs[missionStage];
+      if (config?.allowFreeCommandInsert) {
+        setCommands((prev) => {
+          const insertAt = Math.max(
+            1,
+            prev.findIndex((c) => c.type === "착륙")
+          );
+          const next = [...prev];
+          next.splice(insertAt, 0, { ...createCommand(type), replacedMissionBlank: true });
+          return next;
+        });
+        setCenterResult(null);
+        return;
+      }
       const fillFirstBlank = (list) => {
         let replaced = false;
         const next = list.map((c) => {
