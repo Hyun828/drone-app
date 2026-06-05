@@ -34,6 +34,35 @@ function clamp01(value) {
   return Math.max(0, Math.min(1, value));
 }
 
+const CODING_CAMERA_ORBIT_YAW_SENSITIVITY = 0.0025;
+const CODING_CAMERA_ORBIT_PITCH_SENSITIVITY = 0.0018;
+const CONTROL_CAMERA_ORBIT_YAW_SENSITIVITY = 0.0014;
+const CONTROL_CAMERA_ORBIT_PITCH_SENSITIVITY = 0.001;
+const CONTROL_CAMERA_PINCH_PAN_SENSITIVITY = 0.006;
+const CAMERA_ORBIT_PITCH_MIN = -0.85;
+const CAMERA_ORBIT_PITCH_MAX = 0.35;
+
+function applyOrbitDragToSetters(
+  deltaX,
+  deltaY,
+  pointerType,
+  setYaw,
+  setPitch,
+  yawSensitivity = CODING_CAMERA_ORBIT_YAW_SENSITIVITY,
+  pitchSensitivity = CODING_CAMERA_ORBIT_PITCH_SENSITIVITY
+) {
+  const dragX = pointerType === "touch" ? -deltaX : deltaX;
+  const dragY = pointerType === "touch" ? -deltaY : deltaY;
+  setYaw((prev) => prev - dragX * yawSensitivity);
+  setPitch((prev) =>
+    clamp(
+      prev - dragY * pitchSensitivity,
+      CAMERA_ORBIT_PITCH_MIN,
+      CAMERA_ORBIT_PITCH_MAX
+    )
+  );
+}
+
 function getShadowScale(height, nearScale, farScale) {
   const t = clamp01((Math.max(0.5, height) - 0.5) / 8);
   return nearScale - (nearScale - farScale) * t;
@@ -2554,12 +2583,13 @@ function CodingScene({
   const pinchLastMidRef = useRef({ x: 0, y: 0 });
 
   const applyCameraOrbitDelta = useCallback((deltaX, deltaY, pointerType = "mouse") => {
-    // Orbit around the drone look-at point (not the touch/cursor screen position).
-    // Touch uses inverted drag so the scene follows the finger like grabbing a map.
-    const dragX = pointerType === "touch" ? -deltaX : deltaX;
-    const dragY = pointerType === "touch" ? -deltaY : deltaY;
-    setCameraYawOffset((prev) => prev - dragX * 0.0025);
-    setCameraPitchOffset((prev) => clamp(prev - dragY * 0.0018, -0.85, 0.35));
+    applyOrbitDragToSetters(
+      deltaX,
+      deltaY,
+      pointerType,
+      setCameraYawOffset,
+      setCameraPitchOffset
+    );
   }, []);
 
   const getTouchDistance = (t1, t2) => {
@@ -2920,6 +2950,7 @@ function ControlMode() {
 
   const [controlMode, setControlMode] = useState("normal");
   const [cameraMode, setCameraMode] = useState("fixed");
+  const cameraModeRef = useRef("fixed");
   const [showGuide, setShowGuide] = useState(false);
   const [fixedYawOffset, setFixedYawOffset] = useState(0);
   const [fixedPitchOffset, setFixedPitchOffset] = useState(-0.12);
@@ -3568,6 +3599,11 @@ function ControlMode() {
     syncStatus,
   ]);
 
+  const resetStageAndView = useCallback(() => {
+    resetToFixedCameraView();
+    resetStageOnly();
+  }, [resetStageOnly, resetToFixedCameraView]);
+
   const handleTutorialLeftStickInput = useCallback(
     (inputVertical, yawInput) => {
       if (tutorialInputLockedRef.current) return;
@@ -3858,6 +3894,10 @@ function ControlMode() {
   }, [toggleTakeoffLand]);
 
   useEffect(() => {
+    cameraModeRef.current = cameraMode;
+  }, [cameraMode]);
+
+  useEffect(() => {
     function isUiTarget(target) {
       return (
         target instanceof Element &&
@@ -3882,6 +3922,7 @@ function ControlMode() {
     function handleWindowPointerDown(e) {
       if (isUiTarget(e.target)) return;
       if (pinchActiveRef.current) return;
+      if (cameraModeRef.current !== "fixed") return;
       isCameraDraggingRef.current = true;
       cameraDragPointerIdRef.current = e.pointerId;
       lastCameraDragXRef.current = e.clientX;
@@ -3891,6 +3932,7 @@ function ControlMode() {
     function handleWindowPointerMove(e) {
       if (!isCameraDraggingRef.current) return;
       if (pinchActiveRef.current) return;
+      if (cameraModeRef.current !== "fixed") return;
       if (
         cameraDragPointerIdRef.current !== null &&
         e.pointerId !== cameraDragPointerIdRef.current
@@ -3901,8 +3943,23 @@ function ControlMode() {
       lastCameraDragXRef.current = e.clientX;
       const deltaY = e.clientY - lastCameraDragYRef.current;
       lastCameraDragYRef.current = e.clientY;
-      setFixedYawOffset((prev) => prev - deltaX * 0.006);
-      setFixedPitchOffset((prev) => clamp(prev - deltaY * 0.004, -0.85, 0.35));
+      applyOrbitDragToSetters(
+        deltaX,
+        deltaY,
+        e.pointerType,
+        setFixedYawOffset,
+        setFixedPitchOffset,
+        CONTROL_CAMERA_ORBIT_YAW_SENSITIVITY,
+        CONTROL_CAMERA_ORBIT_PITCH_SENSITIVITY
+      );
+    }
+
+    function handleWindowWheel(e) {
+      if (isUiTarget(e.target)) return;
+      if (cameraModeRef.current !== "fixed") return;
+      e.preventDefault();
+      const factor = e.deltaY > 0 ? 1.05 : 0.95;
+      setFixedZoomScale((prev) => clamp(prev * factor, 0.6, 2.0));
     }
 
     function stopCameraDrag(e) {
@@ -3933,6 +3990,7 @@ function ControlMode() {
 
     function handleWindowTouchMove(e) {
       if (!pinchActiveRef.current) return;
+      if (cameraModeRef.current !== "fixed") return;
       if (!e.touches || e.touches.length < 2) {
         pinchActiveRef.current = false;
         return;
@@ -3958,7 +4016,7 @@ function ControlMode() {
         const px = prev?.[0] ?? 0;
         const py = prev?.[1] ?? 0;
         const pz = prev?.[2] ?? 0;
-        const panScale = 0.01;
+        const panScale = CONTROL_CAMERA_PINCH_PAN_SENSITIVITY;
         return [px - dx * panScale, py, pz + dy * panScale];
       });
 
@@ -3983,6 +4041,7 @@ function ControlMode() {
     });
     window.addEventListener("pointerup", stopCameraDrag, { passive: true });
     window.addEventListener("pointercancel", stopCameraDrag, { passive: true });
+    window.addEventListener("wheel", handleWindowWheel, { passive: false });
     window.addEventListener("touchstart", handleWindowTouchStart, { passive: false });
     window.addEventListener("touchmove", handleWindowTouchMove, { passive: false });
     window.addEventListener("touchend", handleWindowTouchEndOrCancel, { passive: false });
@@ -3993,6 +4052,7 @@ function ControlMode() {
       window.removeEventListener("pointermove", handleWindowPointerMove);
       window.removeEventListener("pointerup", stopCameraDrag);
       window.removeEventListener("pointercancel", stopCameraDrag);
+      window.removeEventListener("wheel", handleWindowWheel);
       window.removeEventListener("touchstart", handleWindowTouchStart);
       window.removeEventListener("touchmove", handleWindowTouchMove);
       window.removeEventListener("touchend", handleWindowTouchEndOrCancel);
@@ -4110,14 +4170,7 @@ function ControlMode() {
 
             <div className="flex gap-2">
               <button
-                onClick={() => {
-                  setCameraMode("fixed");
-                  // Reset fixed camera to initial view
-                  setFixedYawOffset(0);
-                  setFixedPitchOffset(-0.12);
-                  setFixedZoomScale(1);
-                  setFixedLookOffset([0, 0, 0]);
-                }}
+                onClick={resetToFixedCameraView}
                 className={`flex-1 px-2 py-1 rounded-lg font-semibold text-[11px] sm:text-xs ${
                   cameraMode === "fixed" ? "bg-teal-600 text-white" : "bg-gray-200 text-gray-800"
                 }`}
@@ -4299,7 +4352,7 @@ function ControlMode() {
             {status.isFlying ? "착륙" : "이륙"}
           </button>
           <button
-            onClick={resetStageOnly}
+            onClick={resetStageAndView}
             className="px-4 sm:px-6 py-1.5 sm:py-3 rounded-lg font-semibold text-sm sm:text-base shadow bg-gray-700 text-white"
           >
             리셋
