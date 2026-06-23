@@ -1918,56 +1918,58 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
                       : ""
                   } touch-none`}
                   >
-                    <div className="flex items-center gap-1">
+                    <div className="flex min-w-0 flex-1 items-center gap-1 pr-1">
                       <span className="text-sm font-semibold">{index + 1}.</span>
                       {renderCommandEditor(command)}
                     </div>
-                    {isFreeInsertMissionStage && (
-                      <div className="absolute right-7 top-1 flex flex-col gap-0.5">
-                        <button
-                          onPointerDown={(e) => e.stopPropagation()}
-                          onClick={() => moveCommandUp(index)}
-                          disabled={isRunning || index <= 1}
-                          className="w-5 h-5 text-[10px] bg-slate-600 text-white rounded disabled:bg-gray-300"
-                          aria-label="명령 위로 이동"
-                          title="위로 이동"
-                        >
-                          ▲
-                        </button>
-                        <button
-                          onPointerDown={(e) => e.stopPropagation()}
-                          onClick={() => moveCommandDown(index)}
-                          disabled={isRunning || index >= commands.length - 2}
-                          className="w-5 h-5 text-[10px] bg-slate-600 text-white rounded disabled:bg-gray-300"
-                          aria-label="명령 아래로 이동"
-                          title="아래로 이동"
-                        >
-                          ▼
-                        </button>
-                      </div>
-                    )}
-                    <button
-                      onPointerDown={(e) => e.stopPropagation()}
-                      onClick={() => removeCommand(command.id)}
-                      disabled={
-                        isRunning ||
-                        command.id === 1 ||
-                        (isMissionMode &&
-                          !isFreeInsertMissionStage &&
-                          !command.replacedMissionBlank)
-                      }
-                      className="absolute right-1 top-1 w-5 h-5 text-[10px] bg-red-500 text-white rounded-full disabled:bg-gray-300"
-                      aria-label="명령 삭제"
-                      title={
-                        command.id === 1
-                          ? "기본 이륙 명령은 삭제할 수 없습니다."
-                          : isMissionMode && command.replacedMissionBlank
-                            ? "빈칸으로 되돌리기"
-                            : "명령 삭제"
-                      }
-                    >
-                      X
-                    </button>
+                    <div className="flex shrink-0 items-center gap-0.5">
+                      {isFreeInsertMissionStage && (
+                        <>
+                          <button
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onClick={() => moveCommandUp(index)}
+                            disabled={isRunning || index <= 1}
+                            className="flex h-3.5 w-3.5 items-center justify-center rounded bg-slate-600 text-[8px] leading-none text-white disabled:bg-gray-300"
+                            aria-label="명령 위로 이동"
+                            title="위로 이동"
+                          >
+                            ▲
+                          </button>
+                          <button
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onClick={() => moveCommandDown(index)}
+                            disabled={isRunning || index >= commands.length - 2}
+                            className="flex h-3.5 w-3.5 items-center justify-center rounded bg-slate-600 text-[8px] leading-none text-white disabled:bg-gray-300"
+                            aria-label="명령 아래로 이동"
+                            title="아래로 이동"
+                          >
+                            ▼
+                          </button>
+                        </>
+                      )}
+                      <button
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={() => removeCommand(command.id)}
+                        disabled={
+                          isRunning ||
+                          command.id === 1 ||
+                          (isMissionMode &&
+                            !isFreeInsertMissionStage &&
+                            !command.replacedMissionBlank)
+                        }
+                        className="flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[9px] leading-none text-white disabled:bg-gray-300"
+                        aria-label="명령 삭제"
+                        title={
+                          command.id === 1
+                            ? "기본 이륙 명령은 삭제할 수 없습니다."
+                            : isMissionMode && command.replacedMissionBlank
+                              ? "빈칸으로 되돌리기"
+                              : "명령 삭제"
+                        }
+                      >
+                        X
+                      </button>
+                    </div>
                   </div>
                   {isLoopType(command.type) && renderLoopBox(command)}
                   <div
