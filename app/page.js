@@ -2891,6 +2891,7 @@ function ControlMode() {
   const [tutorialStep, setTutorialStep] = useState(0);
   const [tutorialMissionSuccessActive, setTutorialMissionSuccessActive] =
     useState(false);
+  const [stage5LandingHintMessage, setStage5LandingHintMessage] = useState("");
   const getGameplayStage = useCallback(
     (stageNumber) => {
       if (stageNumber <= 11) return Math.max(1, stageNumber - TUTORIAL_STAGE_COUNT);
@@ -2965,6 +2966,7 @@ function ControlMode() {
   const missionTimerRef = useRef(null);
   const tutorialAdvanceTimerRef = useRef(null);
   const tutorialStepSuccessTimerRef = useRef(null);
+  const stage5LandingHintTimerRef = useRef(null);
   const tutorialSuccessTimerRef = useRef(null);
   const tutorialCelebrationActiveRef = useRef(false);
   const tutorialInputLockedRef = useRef(false);
@@ -3017,9 +3019,10 @@ function ControlMode() {
   );
   const tutorialMessages = tutorialMessageByStage[stage] ?? [];
   const currentTutorialMessage =
-    isTutorialStage && tutorialStep < tutorialMessages.length
+    stage5LandingHintMessage ||
+    (isTutorialStage && tutorialStep < tutorialMessages.length
       ? tutorialMessages[tutorialStep]
-      : "";
+      : "");
   const isNoStrafeMissionStage =
     !isTutorialStage && ((stage >= 12 && stage <= 14) || (stage >= 24 && stage <= 25));
   const controlMissionMessage =
@@ -3053,6 +3056,11 @@ function ControlMode() {
       clearTimeout(tutorialStepSuccessTimerRef.current);
       tutorialStepSuccessTimerRef.current = null;
     }
+    if (stage5LandingHintTimerRef.current) {
+      clearTimeout(stage5LandingHintTimerRef.current);
+      stage5LandingHintTimerRef.current = null;
+    }
+    setStage5LandingHintMessage("");
     tutorialCelebrationActiveRef.current = false;
     tutorialInputLockedRef.current = false;
     setTutorialMissionSuccessActive(false);
@@ -3290,6 +3298,25 @@ function ControlMode() {
     pluck(now, 1320, 440);
     pluck(now + 0.09, 1650, 550);
   }, [ensureAudioGraph]);
+
+  useEffect(() => {
+    if (stage5LandingHintTimerRef.current) {
+      clearTimeout(stage5LandingHintTimerRef.current);
+      stage5LandingHintTimerRef.current = null;
+    }
+    setStage5LandingHintMessage("");
+    if (stage !== 5 || tutorialStep !== 1) return undefined;
+    stage5LandingHintTimerRef.current = setTimeout(() => {
+      stage5LandingHintTimerRef.current = null;
+      setStage5LandingHintMessage("자유비행을 완료했으면 착륙 버튼을 누르세요");
+    }, 10000);
+    return () => {
+      if (stage5LandingHintTimerRef.current) {
+        clearTimeout(stage5LandingHintTimerRef.current);
+        stage5LandingHintTimerRef.current = null;
+      }
+    };
+  }, [stage, tutorialStep]);
 
   const scheduleTutorialStepSuccess = useCallback(
     (nextStep) => {
@@ -4108,6 +4135,9 @@ function ControlMode() {
         clearTimeout(tutorialStepSuccessTimerRef.current);
       }
       if (tutorialSuccessTimerRef.current) clearTimeout(tutorialSuccessTimerRef.current);
+      if (stage5LandingHintTimerRef.current) {
+        clearTimeout(stage5LandingHintTimerRef.current);
+      }
     };
   }, []);
 

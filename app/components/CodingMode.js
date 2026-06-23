@@ -56,6 +56,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
   const [isFastExecution, setIsFastExecution] = useState(false);
   const [obstacleColor, setObstacleColor] = useState("#a78bfa");
   const [cameraResetToken, setCameraResetToken] = useState(0);
+  const [selectedLoopId, setSelectedLoopId] = useState(null);
   const [isSmallScreen, setIsSmallScreen] = useState(false);
   const [isPortrait, setIsPortrait] = useState(false);
 
@@ -324,6 +325,8 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     [missionStageConfigs]
   );
   const isMissionMode = codingMainMode === "mission";
+  const isFreeInsertMissionStage =
+    isMissionMode && Boolean(missionStageConfigs[missionStage]?.allowFreeCommandInsert);
   const isBlankCommand = (command) => command?.type === "빈칸";
   /** 미션 반복 안 빈칸까지 포함 — 얕은 some()만 쓰면 빈칸 없이 실행되는 버그가 난다. */
   function commandTreeContainsBlank(list) {
@@ -605,20 +608,42 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     setShowLeftCommandList(false);
   }
 
+  function insertBeforeLanding(list, command) {
+    const landingIdx = list.findIndex((c) => c.type === "착륙");
+    const insertAt = landingIdx > 0 ? landingIdx : list.length;
+    const next = [...list];
+    next.splice(insertAt, 0, command);
+    return next;
+  }
+
+  function findLastTopLevelLoopId(list) {
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      if (isLoopType(list[i]?.type)) return list[i].id;
+    }
+    return null;
+  }
+
   function addCommandFromPalette(type) {
     if (isRunning) return;
     if (isMissionMode) {
       const config = missionStageConfigs[missionStage];
       if (config?.allowFreeCommandInsert) {
-        setCommands((prev) => {
-          const insertAt = Math.max(
-            1,
-            prev.findIndex((c) => c.type === "착륙")
-          );
-          const next = [...prev];
-          next.splice(insertAt, 0, { ...createCommand(type), replacedMissionBlank: true });
-          return next;
-        });
+        const newCmd = { ...createCommand(type), replacedMissionBlank: true };
+        if (isLoopType(type)) {
+          setSelectedLoopId(newCmd.id);
+          setCommands((prev) => insertBeforeLanding(prev, newCmd));
+        } else {
+          setCommands((prev) => {
+            const loopId =
+              selectedLoopId && findCommandById(prev, selectedLoopId)
+                ? selectedLoopId
+                : findLastTopLevelLoopId(prev);
+            if (loopId) {
+              return insertIntoLoop(prev, loopId, newCmd);
+            }
+            return insertBeforeLanding(prev, newCmd);
+          });
+        }
         setCenterResult(null);
         return;
       }
@@ -649,7 +674,8 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
   }
 
   function moveCommandUp(index) {
-    if (isRunning || index === 0 || isMissionMode) return;
+    if (isRunning || index <= 1) return;
+    if (isMissionMode && !isFreeInsertMissionStage) return;
     setCommands((prev) => {
       const next = [...prev];
       [next[index - 1], next[index]] = [next[index], next[index - 1]];
@@ -658,7 +684,8 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
   }
 
   function moveCommandDown(index) {
-    if (isRunning || index === commands.length - 1 || isMissionMode) return;
+    if (isRunning || index >= commands.length - 2) return;
+    if (isMissionMode && !isFreeInsertMissionStage) return;
     setCommands((prev) => {
       const next = [...prev];
       [next[index], next[index + 1]] = [next[index + 1], next[index]];
@@ -1367,6 +1394,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     setSelectedPlacementType(null);
     setCenterResult(null);
     setShowMissionIntro(true);
+    setSelectedLoopId(null);
     setCameraResetToken((v) => v + 1);
   }, [isMissionMode, missionStage]);
 
@@ -1378,6 +1406,13 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
       editIntroTimerRef.current = null;
     }
     if (codingMainMode === "edit") {
+      resetDroneOnly();
+      setPlacedItems({ obstacles: [], goal: null });
+      setCommands([{ id: 1, type: "이륙", amount: null }]);
+      nextCommandIdRef.current = 2;
+      setSelectedPlacementType("obstacle");
+      setSelectedLoopId(null);
+      setCameraResetToken((v) => v + 1);
       setShowEditIntro(true);
       editIntroTimerRef.current = setTimeout(() => {
         editIntroTimerRef.current = null;
@@ -1602,10 +1637,17 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
         <div className="text-[11px] text-violet-700 font-semibold mb-1">반복 내부 명령</div>
         <div
           data-loop-drop-id={loopCommand.id}
+          onClick={() => {
+            if (!isRunning && isFreeInsertMissionStage) {
+              setSelectedLoopId(loopCommand.id);
+            }
+          }}
           className={`min-h-8 rounded-md border-2 border-dashed px-2 py-1 text-xs ${
-            dropTarget?.type === "loop" && dropTarget.loopId === loopCommand.id
-              ? "border-violet-500 bg-violet-100 text-violet-700"
-              : "border-violet-300 text-violet-500"
+            selectedLoopId === loopCommand.id
+              ? "border-violet-600 bg-violet-100 text-violet-800 ring-2 ring-violet-400/70"
+              : dropTarget?.type === "loop" && dropTarget.loopId === loopCommand.id
+                ? "border-violet-500 bg-violet-100 text-violet-700"
+                : "border-violet-300 text-violet-500"
           }`}
         >
           <div
@@ -1638,7 +1680,10 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
                   <button
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={() => removeCommand(child.id)}
-                    disabled={isRunning || (isMissionMode && !child.replacedMissionBlank)}
+                    disabled={
+                      isRunning ||
+                      (isMissionMode && !isFreeInsertMissionStage && !child.replacedMissionBlank)
+                    }
                     className="absolute right-1 top-1 w-4 h-4 text-[9px] bg-red-500 text-white rounded-full disabled:bg-gray-300"
                     aria-label="반복 내부 명령 삭제"
                     title={
@@ -1858,7 +1903,9 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
                   <div
                     onPointerDown={(e) => startListPointerDrag(e, command.id)}
                     className={`relative flex items-center justify-between gap-2 px-3 py-2 rounded-lg ${
-                      isRunning || isMissionMode ? "cursor-default" : "cursor-grab active:cursor-grabbing"
+                      isRunning || (isMissionMode && !isFreeInsertMissionStage)
+                        ? "cursor-default"
+                        : "cursor-grab active:cursor-grabbing"
                     } ${
                       isBlankCommand(command)
                         ? "bg-gray-100 text-gray-500 border-2 border-dashed border-gray-400"
@@ -1875,13 +1922,39 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
                       <span className="text-sm font-semibold">{index + 1}.</span>
                       {renderCommandEditor(command)}
                     </div>
+                    {isFreeInsertMissionStage && (
+                      <div className="absolute right-7 top-1 flex flex-col gap-0.5">
+                        <button
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onClick={() => moveCommandUp(index)}
+                          disabled={isRunning || index <= 1}
+                          className="w-5 h-5 text-[10px] bg-slate-600 text-white rounded disabled:bg-gray-300"
+                          aria-label="명령 위로 이동"
+                          title="위로 이동"
+                        >
+                          ▲
+                        </button>
+                        <button
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onClick={() => moveCommandDown(index)}
+                          disabled={isRunning || index >= commands.length - 2}
+                          className="w-5 h-5 text-[10px] bg-slate-600 text-white rounded disabled:bg-gray-300"
+                          aria-label="명령 아래로 이동"
+                          title="아래로 이동"
+                        >
+                          ▼
+                        </button>
+                      </div>
+                    )}
                     <button
                       onPointerDown={(e) => e.stopPropagation()}
                       onClick={() => removeCommand(command.id)}
                       disabled={
                         isRunning ||
                         command.id === 1 ||
-                        (isMissionMode && !command.replacedMissionBlank)
+                        (isMissionMode &&
+                          !isFreeInsertMissionStage &&
+                          !command.replacedMissionBlank)
                       }
                       className="absolute right-1 top-1 w-5 h-5 text-[10px] bg-red-500 text-white rounded-full disabled:bg-gray-300"
                       aria-label="명령 삭제"
@@ -1915,9 +1988,9 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
               className={`px-3 py-1.5 rounded-md text-xs font-semibold ${
                 isFastExecution ? "bg-amber-600 text-white" : "bg-gray-200 text-gray-700"
               }`}
-              title="코딩 실행 속도 2배 토글"
+              title="드론 실행 속도 2배 토글"
             >
-              {isFastExecution ? "2x ON" : "2x"}
+              {isFastExecution ? "드론속도 2배 ON" : "드론속도 2배"}
             </button>
             <button
               onClick={clearCommands}
