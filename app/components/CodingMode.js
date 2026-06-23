@@ -56,7 +56,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
   const [isFastExecution, setIsFastExecution] = useState(false);
   const [obstacleColor, setObstacleColor] = useState("#a78bfa");
   const [cameraResetToken, setCameraResetToken] = useState(0);
-  const [selectedLoopId, setSelectedLoopId] = useState(null);
+  const [pendingLoopInsertId, setPendingLoopInsertId] = useState(null);
   const [isSmallScreen, setIsSmallScreen] = useState(false);
   const [isPortrait, setIsPortrait] = useState(false);
 
@@ -608,6 +608,15 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     setShowLeftCommandList(false);
   }
 
+  function clearPendingLoopInsert() {
+    setPendingLoopInsertId(null);
+  }
+
+  function armLoopInsert(loopId) {
+    if (isRunning) return;
+    setPendingLoopInsertId(loopId);
+  }
+
   function insertBeforeLanding(list, command) {
     const landingIdx = list.findIndex((c) => c.type === "착륙");
     const insertAt = landingIdx > 0 ? landingIdx : list.length;
@@ -616,33 +625,27 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     return next;
   }
 
-  function findLastTopLevelLoopId(list) {
-    for (let i = list.length - 1; i >= 0; i -= 1) {
-      if (isLoopType(list[i]?.type)) return list[i].id;
-    }
-    return null;
-  }
-
   function addCommandFromPalette(type) {
     if (isRunning) return;
     if (isMissionMode) {
       const config = missionStageConfigs[missionStage];
       if (config?.allowFreeCommandInsert) {
         const newCmd = { ...createCommand(type), replacedMissionBlank: true };
-        if (isLoopType(type)) {
-          setSelectedLoopId(newCmd.id);
+        const insertOutsideOnly =
+          type === "이륙" || type === "착륙" || isLoopType(type);
+        if (insertOutsideOnly) {
+          clearPendingLoopInsert();
           setCommands((prev) => insertBeforeLanding(prev, newCmd));
-        } else {
+        } else if (pendingLoopInsertId) {
           setCommands((prev) => {
-            const loopId =
-              selectedLoopId && findCommandById(prev, selectedLoopId)
-                ? selectedLoopId
-                : findLastTopLevelLoopId(prev);
-            if (loopId) {
-              return insertIntoLoop(prev, loopId, newCmd);
+            if (!findCommandById(prev, pendingLoopInsertId)) {
+              clearPendingLoopInsert();
+              return insertBeforeLanding(prev, newCmd);
             }
-            return insertBeforeLanding(prev, newCmd);
+            return insertIntoLoop(prev, pendingLoopInsertId, newCmd);
           });
+        } else {
+          setCommands((prev) => insertBeforeLanding(prev, newCmd));
         }
         setCenterResult(null);
         return;
@@ -714,12 +717,14 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
           c.children?.length ? { ...c, children: removeRecursively(c.children) } : c
         );
     if (isMissionMode) {
+      const config = missionStageConfigs[missionStage];
+      if (config?.allowFreeCommandInsert) {
+        if (commandId === pendingLoopInsertId) clearPendingLoopInsert();
+        setCommands((prev) => removeRecursively(prev));
+        setCenterResult(null);
+        return;
+      }
       setCommands((prev) => {
-        const config = missionStageConfigs[missionStage];
-        if (config?.allowFreeCommandInsert) {
-          // 자유 추가 단계(예: 6단계)는 삭제 시 빈칸 복구 대신 완전 삭제.
-          return removeRecursively(prev);
-        }
         const target = findCommandById(prev, commandId);
         if (!target || isBlankCommand(target) || !target.replacedMissionBlank) return prev;
         return replaceCommandIdWithBlankRecursive(prev, commandId);
@@ -1394,7 +1399,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     setSelectedPlacementType(null);
     setCenterResult(null);
     setShowMissionIntro(true);
-    setSelectedLoopId(null);
+    clearPendingLoopInsert();
     setCameraResetToken((v) => v + 1);
   }, [isMissionMode, missionStage]);
 
@@ -1411,7 +1416,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
       setCommands([{ id: 1, type: "이륙", amount: null }]);
       nextCommandIdRef.current = 2;
       setSelectedPlacementType("obstacle");
-      setSelectedLoopId(null);
+      clearPendingLoopInsert();
       setCameraResetToken((v) => v + 1);
       setShowEditIntro(true);
       editIntroTimerRef.current = setTimeout(() => {
@@ -1628,22 +1633,39 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
 
   const renderLoopBox = (loopCommand, depth = 1) => {
     const children = loopCommand.children ?? [];
+    const isLoopInsertArmed =
+      isFreeInsertMissionStage && pendingLoopInsertId === loopCommand.id;
     return (
       <div
         className={`mt-1 mb-1 border-l-4 border-t-4 border-b-4 border-violet-500 rounded-l-lg bg-violet-50/60 p-2 ${
           depth > 1 ? "ml-2 mr-0.5" : "ml-2 mr-1"
         }`}
       >
-        <div className="text-[11px] text-violet-700 font-semibold mb-1">반복 내부 명령</div>
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <div className="text-[11px] font-semibold text-violet-700">반복 내부 명령</div>
+          {isFreeInsertMissionStage && (
+            <button
+              type="button"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                armLoopInsert(loopCommand.id);
+              }}
+              disabled={isRunning}
+              className={`rounded px-1.5 py-0.5 text-[10px] font-semibold leading-tight ${
+                isLoopInsertArmed
+                  ? "bg-violet-600 text-white ring-2 ring-violet-300"
+                  : "bg-violet-500 text-white hover:bg-violet-600"
+              } disabled:bg-gray-300`}
+            >
+              + 명령 추가
+            </button>
+          )}
+        </div>
         <div
           data-loop-drop-id={loopCommand.id}
-          onClick={() => {
-            if (!isRunning && isFreeInsertMissionStage) {
-              setSelectedLoopId(loopCommand.id);
-            }
-          }}
           className={`min-h-8 rounded-md border-2 border-dashed px-2 py-1 text-xs ${
-            selectedLoopId === loopCommand.id
+            isLoopInsertArmed
               ? "border-violet-600 bg-violet-100 text-violet-800 ring-2 ring-violet-400/70"
               : dropTarget?.type === "loop" && dropTarget.loopId === loopCommand.id
                 ? "border-violet-500 bg-violet-100 text-violet-700"
@@ -1662,7 +1684,9 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
             }`}
           />
           {children.length === 0 ? (
-            "여기에 명령 블록을 놓으세요"
+            isFreeInsertMissionStage
+              ? "+ 명령 추가를 누른 뒤 위 명령 블록을 선택하세요"
+              : "여기에 명령 블록을 놓으세요"
           ) : (
             children.map((child, childIdx) => (
               <div key={child.id} data-loop-item="true">
@@ -1719,6 +1743,18 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
     <div className="w-full h-full min-h-0 flex flex-col relative">
       {showTopCommandPalette && (
         <div className="p-1 sm:p-2 md:p-4 bg-white border-b shrink-0 select-none">
+          {isFreeInsertMissionStage && pendingLoopInsertId && (
+            <div className="mb-1 flex items-center justify-between gap-2 rounded-md bg-violet-50 px-2 py-1 text-[11px] text-violet-800">
+              <span>반복 안에 명령을 추가하는 중입니다</span>
+              <button
+                type="button"
+                onClick={clearPendingLoopInsert}
+                className="rounded bg-violet-600 px-2 py-0.5 text-[10px] font-semibold text-white"
+              >
+                바깥에 추가
+              </button>
+            </div>
+          )}
           <div className="flex items-center gap-2">
             <button
               onClick={closeCodingUI}
