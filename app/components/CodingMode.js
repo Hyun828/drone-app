@@ -1744,14 +1744,14 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
       {showTopCommandPalette && (
         <div className="p-1 sm:p-2 md:p-4 bg-white border-b shrink-0 select-none">
           {isFreeInsertMissionStage && pendingLoopInsertId && (
-            <div className="mb-1 flex items-center justify-between gap-2 rounded-md bg-violet-50 px-2 py-1 text-[11px] text-violet-800">
+            <div className="mb-1 inline-flex max-w-full items-center gap-1.5 rounded-md bg-violet-50 px-2 py-1 text-[11px] text-violet-800">
               <span>반복 안에 명령을 추가하는 중입니다</span>
               <button
                 type="button"
                 onClick={clearPendingLoopInsert}
-                className="rounded bg-violet-600 px-2 py-0.5 text-[10px] font-semibold text-white"
+                className="shrink-0 rounded bg-violet-600 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white"
               >
-                바깥에 추가
+                (종료)
               </button>
             </div>
           )}
