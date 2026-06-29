@@ -2122,6 +2122,10 @@ function ControlDrone({
     }
 
     if (!c.isCrash && !c.isSuccess) {
+      // 프레임 독립성: 매 프레임 물리 계산을 60fps 기준으로 정규화한다.
+      // (120/144Hz 등 고주사율 모니터에서도 60Hz와 동일한 이동 속도가 되도록)
+      const frameScale = Math.min(3, Math.max(0.0001, delta * 60));
+
       if (c.isGroundRotorSpin) {
         c.position[1] = c.minHeight;
         c.velocity = [0, 0, 0];
@@ -2159,7 +2163,7 @@ function ControlDrone({
           c.velocity[1] = 0;
         } else {
           // gentle descend with inertia feel
-          c.velocity[1] = Math.max(c.velocity[1] - 0.0022, -0.026);
+          c.velocity[1] = Math.max(c.velocity[1] - 0.0022 * frameScale, -0.026);
         }
       } else if (c.isFlying) {
         let yawInput =
@@ -2203,8 +2207,8 @@ function ControlDrone({
         c.rotation += yawInput * c.yawSpeed * delta;
 
         if (controlMode === "headless") {
-          c.velocity[0] += inputStrafe * c.strafeAccel;
-          c.velocity[2] += -inputForward * c.moveAccel;
+          c.velocity[0] += inputStrafe * c.strafeAccel * frameScale;
+          c.velocity[2] += -inputForward * c.moveAccel * frameScale;
         } else {
           const forwardX = -Math.sin(c.rotation);
           const forwardZ = -Math.cos(c.rotation);
@@ -2212,29 +2216,33 @@ function ControlDrone({
           const rightVecZ = -Math.sin(c.rotation);
 
           c.velocity[0] +=
-            forwardX * inputForward * c.moveAccel +
-            rightVecX * inputStrafe * c.strafeAccel;
+            (forwardX * inputForward * c.moveAccel +
+              rightVecX * inputStrafe * c.strafeAccel) *
+            frameScale;
 
           c.velocity[2] +=
-            forwardZ * inputForward * c.moveAccel +
-            rightVecZ * inputStrafe * c.strafeAccel;
+            (forwardZ * inputForward * c.moveAccel +
+              rightVecZ * inputStrafe * c.strafeAccel) *
+            frameScale;
         }
 
-        c.velocity[1] += inputVertical * c.verticalAccel;
+        c.velocity[1] += inputVertical * c.verticalAccel * frameScale;
       }
 
       c.velocity[0] = clamp(c.velocity[0], -c.maxSpeedXZ, c.maxSpeedXZ);
       c.velocity[2] = clamp(c.velocity[2], -c.maxSpeedXZ, c.maxSpeedXZ);
       c.velocity[1] = clamp(c.velocity[1], -c.maxSpeedY, c.maxSpeedY);
 
-      c.velocity[0] *= c.dampingXZ;
-      c.velocity[2] *= c.dampingXZ;
-      c.velocity[1] *= c.dampingY;
+      const dampXZ = Math.pow(c.dampingXZ, frameScale);
+      const dampY = Math.pow(c.dampingY, frameScale);
+      c.velocity[0] *= dampXZ;
+      c.velocity[2] *= dampXZ;
+      c.velocity[1] *= dampY;
 
       const nextPosition = [
-        c.position[0] + c.velocity[0],
-        Math.max(c.minHeight, c.position[1] + c.velocity[1]),
-        c.position[2] + c.velocity[2],
+        c.position[0] + c.velocity[0] * frameScale,
+        Math.max(c.minHeight, c.position[1] + c.velocity[1] * frameScale),
+        c.position[2] + c.velocity[2] * frameScale,
       ];
 
       // When a flying drone touches ground by manual descend, treat it as landing complete.

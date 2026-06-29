@@ -3,7 +3,7 @@
 // 처음 접속할 때 실제로 요청되는 자원을 런타임에 캐시(cache-on-fetch)한다.
 // 한 번 온라인으로 전체를 로드해두면 이후 완전 오프라인으로 동작한다.
 
-const CACHE = "drone-app-v1";
+const CACHE = "drone-app-v2";
 const CORE = ["./", "./index.html", "./manifest.webmanifest", "./icon.svg"];
 
 self.addEventListener("install", (event) => {
@@ -34,22 +34,23 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return; // 동일 출처만 처리
 
-  // 페이지 이동(navigate): 캐시 우선 + 오프라인 시 index.html로 폴백
+  // 페이지 이동(navigate): 네트워크 우선 → 항상 최신 HTML을 받는다.
+  // (옛 HTML이 더 이상 없는 청크를 참조해 앱이 깨지는 문제 방지)
+  // 오프라인일 때만 캐시(index.html)로 폴백한다.
   if (req.mode === "navigate") {
     event.respondWith(
-      caches.match(req).then(
-        (cached) =>
-          cached ||
-          fetch(req)
-            .then((res) => {
-              const copy = res.clone();
-              caches.open(CACHE).then((c) => c.put(req, copy));
-              return res;
-            })
-            .catch(() =>
-              caches.match("./index.html").then((r) => r || caches.match("./"))
-            )
-      )
+      fetch(req)
+        .then((res) => {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(req, copy));
+          return res;
+        })
+        .catch(() =>
+          caches
+            .match(req)
+            .then((r) => r || caches.match("./index.html"))
+            .then((r) => r || caches.match("./"))
+        )
     );
     return;
   }
