@@ -1,11 +1,11 @@
 @echo off
-setlocal
+setlocal enableextensions
 cd /d "%~dp0"
 
 set "PORT=8080"
 
 if not exist "server.exe" (
-  echo [ERROR] server.exe not found.
+  echo [ERROR] server.exe not found in this folder.
   pause
   exit /b 1
 )
@@ -16,15 +16,20 @@ if not exist "out\index.html" (
   exit /b 1
 )
 
-echo.
 echo ==========================================
-echo   Drone App Windows USB Launcher
+echo   Drone Coding - Windows Launcher
 echo   URL: http://127.0.0.1:%PORT%/
 echo ==========================================
-echo.
 echo Keep this window open while using the app.
 echo To stop: close this window or press Ctrl+C.
 echo.
 
-start "" "http://127.0.0.1:%PORT%/"
-"%~dp0server.exe" file-server --root "%~dp0out" --listen ":%PORT%"
+rem Open the default browser a couple seconds after the server starts.
+start "open-browser" /min cmd /c "timeout /t 2 /nobreak >nul & explorer http://127.0.0.1:%PORT%/ & exit"
+
+rem Run the local web server in THIS window (closing it stops the server).
+server.exe file-server --root "%~dp0out" --listen ":%PORT%"
+
+echo.
+echo [Server stopped] If you see an error above, please report it.
+pause

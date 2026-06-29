@@ -1930,7 +1930,8 @@ function VirtualJoystick({
 
   function handleTouchStart(e) {
     if (disabled) return;
-    if (activeRef.current) return;
+    // 이미 한 손가락이 스틱을 점유 중이면 두 번째 손가락(핀치)은 무시
+    if (activeRef.current || activeTouchIdRef.current !== null) return;
 
     const touch = e.changedTouches[0];
     if (!touch) return;
@@ -1947,26 +1948,19 @@ function VirtualJoystick({
 
   useEffect(() => {
     function handleWindowPointerMove(e) {
+      // 터치 발 pointer 이벤트는 touch 경로가 전담 → pointer 세션이 아닐 땐 관여하지 않음
+      if (activePointerIdRef.current === null) return;
       if (!activeRef.current || disabled) return;
-      if (
-        activePointerIdRef.current !== null &&
-        e.pointerId !== activePointerIdRef.current
-      ) {
-        return;
-      }
+      if (e.pointerId !== activePointerIdRef.current) return;
 
       e.preventDefault();
       updateFromDrag(e.clientX, e.clientY);
     }
 
     function handleWindowPointerUpOrCancel(e) {
-      if (!activeRef.current) return;
-      if (
-        activePointerIdRef.current !== null &&
-        e.pointerId !== activePointerIdRef.current
-      ) {
-        return;
-      }
+      // 핵심 방어: 멀티터치/핀치가 유발하는 pointerup이 touch 세션을 끊지 못하게 함
+      if (activePointerIdRef.current === null) return;
+      if (e.pointerId !== activePointerIdRef.current) return;
 
       e.preventDefault();
       activePointerIdRef.current = null;
@@ -2128,6 +2122,10 @@ function ControlDrone({
     }
 
     if (!c.isCrash && !c.isSuccess) {
+      // 프레임 독립성: 매 프레임 물리 계산을 60fps 기준으로 정규화한다.
+      // (120/144Hz 등 고주사율 모니터에서도 60Hz와 동일한 이동 속도가 되도록)
+      const frameScale = Math.min(3, Math.max(0.0001, delta * 60));
+
       if (c.isGroundRotorSpin) {
         c.position[1] = c.minHeight;
         c.velocity = [0, 0, 0];
@@ -2165,7 +2163,7 @@ function ControlDrone({
           c.velocity[1] = 0;
         } else {
           // gentle descend with inertia feel
-          c.velocity[1] = Math.max(c.velocity[1] - 0.0022, -0.026);
+          c.velocity[1] = Math.max(c.velocity[1] - 0.0022 * frameScale, -0.026);
         }
       } else if (c.isFlying) {
         let yawInput =
@@ -2209,8 +2207,8 @@ function ControlDrone({
         c.rotation += yawInput * c.yawSpeed * delta;
 
         if (controlMode === "headless") {
-          c.velocity[0] += inputStrafe * c.strafeAccel;
-          c.velocity[2] += -inputForward * c.moveAccel;
+          c.velocity[0] += inputStrafe * c.strafeAccel * frameScale;
+          c.velocity[2] += -inputForward * c.moveAccel * frameScale;
         } else {
           const forwardX = -Math.sin(c.rotation);
           const forwardZ = -Math.cos(c.rotation);
@@ -2218,29 +2216,33 @@ function ControlDrone({
           const rightVecZ = -Math.sin(c.rotation);
 
           c.velocity[0] +=
-            forwardX * inputForward * c.moveAccel +
-            rightVecX * inputStrafe * c.strafeAccel;
+            (forwardX * inputForward * c.moveAccel +
+              rightVecX * inputStrafe * c.strafeAccel) *
+            frameScale;
 
           c.velocity[2] +=
-            forwardZ * inputForward * c.moveAccel +
-            rightVecZ * inputStrafe * c.strafeAccel;
+            (forwardZ * inputForward * c.moveAccel +
+              rightVecZ * inputStrafe * c.strafeAccel) *
+            frameScale;
         }
 
-        c.velocity[1] += inputVertical * c.verticalAccel;
+        c.velocity[1] += inputVertical * c.verticalAccel * frameScale;
       }
 
       c.velocity[0] = clamp(c.velocity[0], -c.maxSpeedXZ, c.maxSpeedXZ);
       c.velocity[2] = clamp(c.velocity[2], -c.maxSpeedXZ, c.maxSpeedXZ);
       c.velocity[1] = clamp(c.velocity[1], -c.maxSpeedY, c.maxSpeedY);
 
-      c.velocity[0] *= c.dampingXZ;
-      c.velocity[2] *= c.dampingXZ;
-      c.velocity[1] *= c.dampingY;
+      const dampXZ = Math.pow(c.dampingXZ, frameScale);
+      const dampY = Math.pow(c.dampingY, frameScale);
+      c.velocity[0] *= dampXZ;
+      c.velocity[2] *= dampXZ;
+      c.velocity[1] *= dampY;
 
       const nextPosition = [
-        c.position[0] + c.velocity[0],
-        Math.max(c.minHeight, c.position[1] + c.velocity[1]),
-        c.position[2] + c.velocity[2],
+        c.position[0] + c.velocity[0] * frameScale,
+        Math.max(c.minHeight, c.position[1] + c.velocity[1] * frameScale),
+        c.position[2] + c.velocity[2] * frameScale,
       ];
 
       // When a flying drone touches ground by manual descend, treat it as landing complete.
@@ -4491,9 +4493,15 @@ function MainMenu({ onSelectMode }) {
         <MainMenuDrone />
       </Canvas>
 
+      <div className="pointer-events-none absolute right-4 top-3 z-20 text-base md:text-lg font-bold text-slate-700">
+        초등학교 실과 5학년
+      </div>
+
       <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 top-[15%] z-20">
-        <div className="text-5xl md:text-6xl font-black tracking-tight text-slate-900 drop-shadow-sm">
-          드론을 배워 봅시다
+        <div className="text-5xl md:text-6xl font-black tracking-tight text-slate-900 drop-shadow-sm text-center leading-tight">
+          시뮬레이션으로 배우는 비행
+          <br />
+          드론 조종 코딩
         </div>
       </div>
 
@@ -4513,7 +4521,7 @@ function MainMenu({ onSelectMode }) {
       </div>
 
       <div className="absolute right-4 bottom-3 z-20 text-sm text-slate-700 font-semibold">
-        제작자 나규현, 도구 cursor
+        도구 cursor
       </div>
     </div>
   );
