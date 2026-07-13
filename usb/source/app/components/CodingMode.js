@@ -1373,7 +1373,7 @@ export default function CodingMode({ CodingScene, checkBoxHit, getDirectionLabel
               const next = availableStages.find((s) => s > missionStage) ?? missionStage;
               setMissionStage(next);
             } else {
-              resetAll();
+              resetDroneOnly();
             }
           }, 1500);
           return;
