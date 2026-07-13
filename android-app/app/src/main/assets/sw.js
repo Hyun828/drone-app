@@ -3,7 +3,7 @@
 // 처음 접속할 때 실제로 요청되는 자원을 런타임에 캐시(cache-on-fetch)한다.
 // 한 번 온라인으로 전체를 로드해두면 이후 완전 오프라인으로 동작한다.
 
-const CACHE = "drone-app-v2";
+const CACHE = "drone-app-v3";
 const CORE = ["./", "./index.html", "./manifest.webmanifest", "./icon.svg"];
 
 self.addEventListener("install", (event) => {
